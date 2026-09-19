@@ -4,9 +4,9 @@ import os
 import pandas as pd
 import streamlit as st
 
-from siegestats import db, reader, stats, export_excel, sides, rating, store
+from siegestats import db, reader, stats, export_excel, sides, rating, store, operators
 from ui.import_page import veto_editor, opban_grid
-from ui.common import (conn, our_id, series_label, list_series,
+from ui.common import (conn, our_id, series_label, list_series, map_options,
                        roster_names, player_id_by_name, toast, try_autosync, full_sync, bump)
 
 def render_manage():
@@ -181,7 +181,50 @@ def render_manage():
             spick2 = st.selectbox("Series", [series_label(r) for r in srs_all], key="editsrs")
             srow2 = srs_all[[series_label(r) for r in srs_all].index(spick2)]
             sid2, oid2, onm2 = srow2["series_id"], srow2["opponent_id"], srow2["opponent"]
-            et1, et2 = st.tabs(["🗺️ Map bans (veto)", "🚫 Operator bans"])
+            et0, et1, et2 = st.tabs(["🎯 Map & score", "🗺️ Map bans (veto)", "🚫 Operator bans"])
+            with et0:
+                m0 = pd.read_sql_query(
+                    """SELECT map_game_id, map_number, map_name, rounds_won, rounds_lost,
+                              starting_side, import_status, siege_match_id
+                       FROM maps_played WHERE series_id=? ORDER BY map_number""",
+                    conn, params=(sid2,))
+                if m0.empty:
+                    st.caption("No maps in this series yet.")
+                else:
+                    st.caption("Fix a map uploaded under the wrong name, score or order. "
+                               "Result and the series record recalculate on save.")
+                    ed0 = st.data_editor(
+                        m0, width="stretch", hide_index=True, key=f"mapedit_{sid2}",
+                        column_config={
+                            "map_game_id": st.column_config.NumberColumn("ID", disabled=True),
+                            "map_number": st.column_config.NumberColumn("Map #", min_value=1, max_value=5),
+                            "map_name": st.column_config.SelectboxColumn("Map", options=map_options()),
+                            "rounds_won": st.column_config.NumberColumn("Won", min_value=0, max_value=20),
+                            "rounds_lost": st.column_config.NumberColumn("Lost", min_value=0, max_value=20),
+                            "starting_side": st.column_config.SelectboxColumn(
+                                "Started", options=["ATK", "DEF"]),
+                            "import_status": st.column_config.SelectboxColumn(
+                                "Status", options=["confirmed", "in_progress", "needs_review"]),
+                            "siege_match_id": st.column_config.TextColumn("Match ID")})
+                    if st.button("💾 Save map details", key=f"savemaps_{sid2}"):
+                        for _, r in ed0.iterrows():
+                            rw_, rl_ = int(r["rounds_won"] or 0), int(r["rounds_lost"] or 0)
+                            res = "W" if rw_ > rl_ else ("L" if rl_ > rw_ else "T")
+                            conn.execute(
+                                """UPDATE maps_played SET map_number=?, map_name=?, rounds_won=?,
+                                   rounds_lost=?, result=?, starting_side=?, import_status=?,
+                                   siege_match_id=? WHERE map_game_id=?""",
+                                (int(r["map_number"] or 1), r["map_name"], rw_, rl_, res,
+                                 None if pd.isna(r["starting_side"]) else r["starting_side"],
+                                 r["import_status"],
+                                 None if pd.isna(r["siege_match_id"]) else r["siege_match_id"],
+                                 int(r["map_game_id"])))
+                        conn.commit()
+                        db.recalc_series(conn, sid2)
+                        bump()
+                        toast("Map details saved", "🎯")
+                        try_autosync()
+                        st.rerun()
             with et1:
                 st.caption("Add, remove or re-sequence the veto for this series at any time.")
                 veto_editor(sid2, oid2, onm2)
@@ -334,6 +377,24 @@ def render_manage():
             st.success("Saved.")
         if st.button("Reset rating settings to defaults"):
             rating.save_config(conn, rating.DEFAULTS)
+            st.rerun()
+        st.markdown("---")
+        st.markdown("**Operator list** — what the ban dropdowns offer")
+        st.caption("Ubisoft adds operators every season. Edit either list and the ban grids "
+                   "update; the grids also keep any custom name already saved on a map.")
+        ops_now = operators.load(conn)
+        oc1, oc2 = st.columns(2)
+        atk_txt = oc1.text_area("Attackers (one per line)", "\n".join(ops_now["ATK"]), height=200)
+        def_txt = oc2.text_area("Defenders (one per line)", "\n".join(ops_now["DEF"]), height=200)
+        ob1, ob2 = st.columns(2)
+        if ob1.button("Save operator list"):
+            operators.save(conn, atk_txt.splitlines(), def_txt.splitlines())
+            bump()
+            toast("Operator list saved", "🎭")
+            st.rerun()
+        if ob2.button("Reset to built-in list"):
+            operators.reset(conn)
+            bump()
             st.rerun()
         st.markdown("---")
         st.markdown("**Side-swap rules** (used for attack/defense splits)")

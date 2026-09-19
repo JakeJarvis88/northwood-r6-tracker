@@ -273,24 +273,48 @@ def side_gap(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 # ===================================================================== round strip
+LEGACY_CONDITIONS = {"defuse": "objective", "disabled": "objective", "plant": "objective",
+                     "secure": "objective", "wipe": "elimination", "clock": "time"}
+
+
+def normalize_condition(c):
+    c = (c or "unknown").strip().lower()
+    return LEGACY_CONDITIONS.get(c, c if c in ("elimination", "objective", "time") else "unknown")
+
+
 def rounds_from_strip(strip: dict, our_block_is_top: bool, starting_side=None,
                       ot_starting_side=None, rounds_per_half=6):
     """Turn the reader's round-strip output into per-round rows for one map.
 
-    strip: {"top_team_first_half_side": "ATK"/"DEF", "rounds": [{round, winner, ...}]}
-    our_block_is_top: True when Northwood is the team listed first in the player table.
+    The strip's upper row is the BLUE team and the lower row the RED/ORANGE team,
+    regardless of which block is listed first in the player table - replays with
+    "Blue Team / Orange Team" can list orange on top. So winners are matched by
+    color, then mapped to us/them via which block is blue.
 
-    Returns (rows, detected_starting_side). Each row: round_number, won, side,
-    win_condition, confidence. The side for each round comes from the half it falls
-    in, so a round's side is never guessed independently of the swap rules.
+    Accepts the current schema (winner "blue"/"red", blue_block, and
+    blue_team_first_half_side) and the older one (winner "top"/"bottom",
+    top_team_first_half_side) so previously saved extractions still parse.
+
+    Returns (rows, detected_starting_side).
     """
     if not strip:
         return [], None
     raw = strip.get("rounds") or []
-    top_side = strip.get("top_team_first_half_side")
+    blue_block = strip.get("blue_block")
+    # Are we the blue team? Default (live match) is that the top block is blue.
+    if blue_block in ("top", "bottom"):
+        we_are_blue = (blue_block == "top") == bool(our_block_is_top)
+    else:
+        we_are_blue = bool(our_block_is_top)
+
     detected = None
-    if top_side in (ATK, DEF):
-        detected = top_side if our_block_is_top else other(top_side)
+    first_side = strip.get("blue_team_first_half_side")
+    if first_side in (ATK, DEF):
+        detected = first_side if we_are_blue else other(first_side)
+    elif strip.get("top_team_first_half_side") in (ATK, DEF):  # legacy schema
+        legacy = strip["top_team_first_half_side"]
+        detected = legacy if our_block_is_top else other(legacy)
+
     start = starting_side if starting_side in (ATK, DEF) else detected
     rows = []
     for r in raw:
@@ -298,14 +322,16 @@ def rounds_from_strip(strip: dict, our_block_is_top: bool, starting_side=None,
             n = int(r.get("round"))
         except (TypeError, ValueError):
             continue
-        winner = r.get("winner")
+        winner = (r.get("winner") or "").lower()
         won = None
-        if winner in ("top", "bottom"):
+        if winner in ("blue", "red", "orange"):
+            won = 1 if ((winner == "blue") == we_are_blue) else 0
+        elif winner in ("top", "bottom"):  # legacy position-based schema
             won = 1 if ((winner == "top") == bool(our_block_is_top)) else 0
         rows.append({"round_number": n, "won": won,
                      "side": side_for_round(n, start, ot_starting_side, rounds_per_half),
-                     "win_condition": r.get("win_condition") or "unknown",
-                     "confidence": r.get("confidence")})
+                     "win_condition": normalize_condition(r.get("win_condition")),
+                     "confidence": r.get("confidence"), "source": "read"})
     rows.sort(key=lambda x: x["round_number"])
     return rows, detected
 
@@ -402,3 +428,83 @@ def win_conditions(conn, map_game_ids=None) -> pd.DataFrame:
     g = (df.groupby(["side", "Result", "win_condition"]).size().reset_index(name="Rounds")
          .rename(columns={"side": "Side", "win_condition": "How"}))
     return g.sort_values(["Side", "Result", "Rounds"], ascending=[True, True, False])
+
+
+def reconcile_rounds(rows, rounds_won, rounds_lost, default_condition="elimination"):
+    """Force the round-by-round list to agree with the final score.
+
+    The score on screen is large, unambiguous text; the strip is tiny and gets
+    covered by the kill feed. So the score always wins. Returns (rows, notes).
+
+    - too few rounds  -> append filler rounds (marked source 'inferred') until the
+      win/loss tallies match the score, using the most common ending as a guess
+    - too many rounds -> drop the lowest-confidence extras
+    - right count, wrong split -> flip the least confident rounds until it matches
+    """
+    notes = []
+    target_w, target_l = int(rounds_won or 0), int(rounds_lost or 0)
+    total = target_w + target_l
+    if total <= 0:
+        return rows, notes
+
+    rows = [dict(r) for r in rows if r.get("round_number") is not None]
+    for r in rows:
+        r["win_condition"] = normalize_condition(r.get("win_condition"))
+    rows.sort(key=lambda r: r["round_number"])
+
+    # 1. trim surplus rounds, least confident first
+    if len(rows) > total:
+        drop = sorted(rows, key=lambda r: (r.get("confidence") or 0))[: len(rows) - total]
+        rows = [r for r in rows if r not in drop]
+        notes.append(f"dropped {len(drop)} round(s) beyond the {total} the score allows")
+
+    scored = [r for r in rows if r.get("won") in (0, 1)]
+    w = sum(r["won"] for r in scored)
+    l = len(scored) - w
+
+    # 2. flip the least confident rounds when the split is wrong but the count is right
+    if len(rows) == total and (w, l) != (target_w, target_l):
+        while w > target_w and any(r.get("won") == 1 for r in rows):
+            cand = min((r for r in rows if r.get("won") == 1), key=lambda r: (r.get("confidence") or 0))
+            cand["won"], cand["source"] = 0, "corrected"
+            w, l = w - 1, l + 1
+        while l > target_l and any(r.get("won") == 0 for r in rows):
+            cand = min((r for r in rows if r.get("won") == 0), key=lambda r: (r.get("confidence") or 0))
+            cand["won"], cand["source"] = 1, "corrected"
+            w, l = w + 1, l - 1
+        notes.append("flipped the least confident round(s) so the halves match the final score")
+
+    # 3. fill in rounds the reader never saw
+    if len(rows) < total:
+        conds = [r.get("win_condition") for r in rows if r.get("win_condition") not in (None, "unknown")]
+        common = max(set(conds), key=conds.count) if conds else default_condition
+        seen = {r["round_number"] for r in rows}
+        need_w, need_l = target_w - w, target_l - l
+        n = 1
+        added = 0
+        while (need_w > 0 or need_l > 0) and len(rows) < total:
+            while n in seen:
+                n += 1
+            won = 1 if need_w >= need_l and need_w > 0 else 0
+            rows.append({"round_number": n, "won": won, "side": None,
+                         "win_condition": common, "confidence": 0.3, "source": "inferred"})
+            seen.add(n)
+            if won:
+                need_w -= 1
+            else:
+                need_l -= 1
+            added += 1
+        notes.append(f"added {added} round(s) the reader couldn't see, so the total matches "
+                     f"{target_w}-{target_l} (marked inferred — correct them if you know better)")
+
+    rows.sort(key=lambda r: r["round_number"])
+    for i, r in enumerate(rows, 1):  # keep numbering contiguous
+        r["round_number"] = i
+    return rows, notes
+
+
+def apply_sides(rows, starting_side, ot_starting_side=None, rounds_per_half=6):
+    """(Re)label every round's side from the swap rules."""
+    for r in rows:
+        r["side"] = side_for_round(r["round_number"], starting_side, ot_starting_side, rounds_per_half)
+    return rows

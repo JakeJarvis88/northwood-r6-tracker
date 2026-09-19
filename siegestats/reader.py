@@ -27,11 +27,23 @@ MAX_TOKENS = 8000
 
 PROMPT = """You are reading a Tom Clancy's Rainbow Six Siege scoreboard screenshot (live match or Match Replay).
 
-Column order on the scoreboard, left to right after the gamertag, is:
-SCORE (star icon), KILLS (crosshair icon), DEATHS (skull icon), ASSISTS, PING (signal bars).
-Ping is not a stat - read it only to avoid confusing it with assists, then discard it.
+COLUMNS. Left to right after the gamertag there are exactly FIVE numeric columns:
+  1 SCORE   (star icon)      - hundreds or thousands, e.g. 2665, 5606
+  2 KILLS   (crosshair icon) - single digits, rarely above 20
+  3 DEATHS  (skull icon)     - single digits, never more than the rounds played
+  4 ASSISTS (wing icon)      - small, typically 0-6, almost never above 10
+  5 PING    (signal bars)    - THE LAST COLUMN. Usually 15-90. DISCARD IT.
+
+The single most common mistake is reporting PING as assists. Guard against it:
+ - assists is the FOURTH number, ping is the FIFTH and last.
+ - if a value you are about to call "assists" is above 15, you have almost certainly
+   grabbed the ping column - recount the columns from the left and fix it.
+ - assists across all ten players usually total under 30. Ping values look like
+   22, 26, 31, 41, 43 and vary independently of performance.
+If a row has only four numbers visible, decide which one is missing rather than
+shifting the others over; report null for what you cannot see.
 In Match Replay the ping column is usually 0. Replay screenshots may also show a bottom
-row of operator cards with K/D/A per player - use those to cross-check the table.
+row of operator cards reading K/D/A per player - use those to cross-check the table.
 
 Transcribe EXACTLY what is visible. Never guess: if a value is unreadable, use null.
 
@@ -42,11 +54,12 @@ Return ONLY a JSON object (no markdown fences, no commentary) with this shape:
   "match_id": string|null,          // the full "Match ID: ..." string value if visible
   "is_replay": boolean,             // true if REPLAY watermark / replay controls are visible
   "round_strip": {                  // the row of round markers above the player table
-     "top_team_first_half_side": "ATK"|"DEF"|null,  // ATK/DEF label over the FIRST group of rounds, TOP line
+     "blue_block": "top"|"bottom",   // which PLAYER-TABLE block is the BLUE team (see rules)
+     "blue_team_first_half_side": "ATK"|"DEF"|null,  // the ATK/DEF label ABOVE the first group
      "rounds": [                     // one entry per round that has been played, in order
        {"round": int,
-        "winner": "top"|"bottom"|null,      // which scoreboard block won it (see rules below)
-        "win_condition": "elimination"|"time"|"defuse"|"disabled"|"unknown",
+        "winner": "blue"|"red"|null,        // color of the filled marker for that column
+        "win_condition": "elimination"|"objective"|"time"|"unknown",
         "confidence": float}
      ],
      "confidence": float
@@ -71,21 +84,55 @@ Return ONLY a JSON object (no markdown fences, no commentary) with this shape:
 }
 
 READING THE ROUND STRIP (the row of markers between the map name and the player table).
-It is a round-by-round record, left to right, one marker per round played:
- - Each round's marker sits on the line of the team that WON it: a marker on the UPPER line
-   means the team listed first in the player table won that round, LOWER line means the other
-   team won. The winner's marker is also filled/colored while unplayed rounds are plain
-   outlined diamonds - do not report unplayed rounds at all.
- - The icon inside the marker says how the round ended: crosshair = all opponents eliminated,
-   hourglass = time expired, chevrons/down-arrows = objective (defuser planted and run down,
-   or defused), a struck-through or distinct icon = objective disabled. Use "unknown" rather
-   than guessing when the icon is unclear.
- - ATK/DEF labels appear above and below the strip, once per half. The UPPER label belongs to
-   the team listed first in the player table; the LOWER label to the other team. Read the label
-   over the FIRST (leftmost) group of rounds for "top_team_first_half_side".
- - Count carefully and keep the rounds in order; the number of reported rounds should match the
-   two teams' scores added together. Overlays (kill feed, chat, player cards) sometimes cover
-   part of the strip - report only the rounds you can actually see and lower the confidence.
+
+STEP 1 - ROUND COUNT FROM THE SCORE. The two big team scores on the left edge (or the
+banner across the top in a replay) are the source of truth: their SUM is the number of
+rounds played. 7-1 means 8 rounds; 3-7 means 10. There must be that many filled markers.
+Never report more rounds than the score allows. If you can see fewer, some are hidden
+behind the kill feed/chat/player cards - report the ones you can see and say so in notes.
+
+STEP 2 - THE GRID. The strip is a grid of columns, one per round, grouped 6 | 6 | 3 by thin
+vertical dividers (first half, second half, overtime). Column 1 is the leftmost. Each column
+has an UPPER slot and a LOWER slot. Unplayed columns show a small plain outlined diamond in
+both slots - skip them. A played column has exactly ONE filled, colored marker: in the
+upper slot or the lower slot.
+
+STEP 3 - WHO WON: BY COLOR, NOT POSITION.
+  - The UPPER row belongs to the BLUE team. Filled markers there are blue.
+  - The LOWER row belongs to the RED/ORANGE team. Filled markers there are red or orange.
+Which player-table block is blue? Look at the colored team banners on the left edge: the
+block whose banner is blue is the blue team. In a live match your own team is always the
+blue banner and listed on TOP. In a "BLUE TEAM / ORANGE TEAM" replay the ORANGE banner can
+be on top - then blue_block is "bottom" and the upper strip row belongs to the team listed
+SECOND. Report blue_block honestly; do not assume top.
+
+STEP 4 - HOW THE ROUND ENDED (icon inside the filled marker):
+  - crosshair / scope / target        => "elimination"  (all five opponents killed)
+  - double chevron / checkmark shape  => "objective"    (defuser planted and completed, defused, or
+                                                         objective otherwise secured/defended)
+  - hourglass / clock                 => "time"         (round timer ran out)
+  - unreadable                        => "unknown"
+
+STEP 5 - SIDES. Small ATK/DEF labels sit above and below the strip, once for the first group
+of six and once for the second. The label ABOVE belongs to the upper row (the blue team);
+the label BELOW belongs to the lower row. Report the label ABOVE the first group as
+"blue_team_first_half_side". The two labels in a group are always opposites.
+
+WORKED EXAMPLES (real screenshots):
+ A) Live match, left banners "NORTHWOOD 7" (blue, top) / "IOWA 1" (red, bottom). Upper labels
+    DEF then ATK. Columns 1-3 upper blue crosshairs, column 4 lower red chevron, columns 5-7
+    upper blue crosshairs, column 8 upper blue chevron. Report: blue_block "top",
+    blue_team_first_half_side "DEF", rounds 1-8 with winner blue except round 4 red; conditions
+    elimination for 1,2,3,5,6,7, objective for 4 and 8. Sum check: 7 blue + 1 red = 7-1. OK.
+ B) Replay, top banner "BLUE TEAM 7 - 3 ORANGE TEAM", left banners "ORANGE TEAM 3" on top and
+    "BLUE TEAM 7" below; the orange team's players are listed first. Upper labels ATK then DEF.
+    Lower row (orange): hourglass at columns 1 and 4, chevron at column 7. Upper row (blue):
+    chevron 2, crosshair 3, chevron 5, crosshair 6, hourglass 8, crosshairs 9 and 10. Report:
+    blue_block "bottom", blue_team_first_half_side "ATK", winners: 1 red, 2 blue, 3 blue,
+    4 red, 5 blue, 6 blue, 7 red, 8 blue, 9 blue, 10 blue. Sum check: 7 blue + 3 red = 7-3. OK.
+
+Work column by column, left to right, keep round numbers sequential from 1, give each round its
+own confidence, and use below 0.5 for any marker partly covered by an overlay.
 
 Confidence rules: 1.0 only for crisp, unambiguous text. Anything blurry, occluded by chat/UI,
 or inferred from partial characters must be < 0.8 and mentioned in notes. Do not identify
@@ -203,7 +250,33 @@ def read_screenshot(image_bytes: bytes, filename: str = "", api_key: str = None,
     data.setdefault("teams", [])
     for t in data["teams"]:
         t.setdefault("players", [])
+    _guard_assists(data)
     return data
+
+
+def _guard_assists(data):
+    """Catch the classic ping-as-assists slip before it reaches the review table.
+
+    Assists above 15 are implausible on a Siege scoreboard, while ping routinely
+    sits in the 20s-40s. When that shows up we blank the value and flag the row
+    rather than silently storing a ping as a stat.
+    """
+    hits = []
+    for team in data.get("teams", []):
+        for p in team.get("players", []):
+            a = p.get("assists")
+            try:
+                a = int(a) if a is not None else None
+            except (TypeError, ValueError):
+                a = None
+            if a is not None and a > 15:
+                hits.append(f"{p.get('gamertag', '?')} ({a})")
+                p["assists"] = None
+                p["confidence"] = min(float(p.get("confidence") or 1.0), 0.4)
+    if hits:
+        note = ("⚠️ Assist values above 15 look like the ping column, so they were cleared for: "
+                + ", ".join(hits) + ". Re-enter them from the screenshot if they were real.")
+        data["notes"] = ((data.get("notes") or "") + " " + note).strip()
 
 
 def blank_extraction(n_per_team=5) -> dict:

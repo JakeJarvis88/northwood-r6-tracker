@@ -1,0 +1,101 @@
+{
+  "_readme": "Ground truth read by hand from five real scoreboards. Each entry is what the reader SHOULD return for round_strip, plus what the app should derive. Run tests/check_reader.py with an API key to score the live reader against these.",
+  "fixtures": [
+    {
+      "file": "Tom_Clancy_s_Rainbow_Six__Siege2026-9-17-20-46-40.jpg",
+      "map": "BANK", "score": [7, 1], "our_block": "top",
+      "round_strip": {
+        "blue_block": "top", "blue_team_first_half_side": "DEF",
+        "rounds": [
+          {"round": 1, "winner": "blue", "win_condition": "elimination"},
+          {"round": 2, "winner": "blue", "win_condition": "elimination"},
+          {"round": 3, "winner": "blue", "win_condition": "elimination"},
+          {"round": 4, "winner": "red",  "win_condition": "objective"},
+          {"round": 5, "winner": "blue", "win_condition": "elimination"},
+          {"round": 6, "winner": "blue", "win_condition": "elimination"},
+          {"round": 7, "winner": "blue", "win_condition": "elimination"},
+          {"round": 8, "winner": "blue", "win_condition": "objective"}
+        ]
+      },
+      "expect": {"starting_side": "DEF", "half1": [5, 1], "we_won": [1, 2, 3, 5, 6, 7, 8]}
+    },
+    {
+      "file": "Tom_Clancy_s_Rainbow_Six__Siege2026-9-16-21-49-42.jpg",
+      "map": "FORTRESS", "score": [3, 7], "our_block": "top",
+      "round_strip": {
+        "blue_block": "top", "blue_team_first_half_side": "ATK",
+        "rounds": [
+          {"round": 1,  "winner": "red",  "win_condition": "elimination"},
+          {"round": 2,  "winner": "red",  "win_condition": "elimination"},
+          {"round": 3,  "winner": "blue", "win_condition": "objective"},
+          {"round": 4,  "winner": "blue", "win_condition": "elimination"},
+          {"round": 5,  "winner": "red",  "win_condition": "elimination"},
+          {"round": 6,  "winner": "red",  "win_condition": "time"},
+          {"round": 7,  "winner": "blue", "win_condition": "objective"},
+          {"round": 8,  "winner": "red",  "win_condition": "objective"},
+          {"round": 9,  "winner": "red",  "win_condition": "elimination"},
+          {"round": 10, "winner": "red",  "win_condition": "elimination"}
+        ]
+      },
+      "expect": {"starting_side": "ATK", "half1": [2, 4], "we_won": [3, 4, 7]}
+    },
+    {
+      "file": "Tom_Clancy_s_Rainbow_Six__Siege2026-9-16-22-15-48.jpg",
+      "map": "BANK", "score": [3, 7], "our_block": "top",
+      "_note": "Blue/Orange replay: orange (us) listed on top, but the upper strip row is BLUE (them).",
+      "round_strip": {
+        "blue_block": "bottom", "blue_team_first_half_side": "ATK",
+        "rounds": [
+          {"round": 1,  "winner": "red",  "win_condition": "time"},
+          {"round": 2,  "winner": "blue", "win_condition": "objective"},
+          {"round": 3,  "winner": "blue", "win_condition": "elimination"},
+          {"round": 4,  "winner": "red",  "win_condition": "time"},
+          {"round": 5,  "winner": "blue", "win_condition": "objective"},
+          {"round": 6,  "winner": "blue", "win_condition": "elimination"},
+          {"round": 7,  "winner": "red",  "win_condition": "objective"},
+          {"round": 8,  "winner": "blue", "win_condition": "time"},
+          {"round": 9,  "winner": "blue", "win_condition": "elimination"},
+          {"round": 10, "winner": "blue", "win_condition": "elimination"}
+        ]
+      },
+      "expect": {"starting_side": "DEF", "half1": [2, 4], "we_won": [1, 4, 7]}
+    },
+    {
+      "file": "Tom_Clancy_s_Rainbow_Six__Siege2026-9-17-21-42-26.jpg",
+      "map": "CHALET", "score": [7, 2], "our_block": "top",
+      "round_strip": {
+        "blue_block": "top", "blue_team_first_half_side": "DEF",
+        "rounds": [
+          {"round": 1, "winner": "blue", "win_condition": "elimination"},
+          {"round": 2, "winner": "red",  "win_condition": "elimination"},
+          {"round": 3, "winner": "red",  "win_condition": "objective"},
+          {"round": 4, "winner": "blue", "win_condition": "elimination"},
+          {"round": 5, "winner": "blue", "win_condition": "objective"},
+          {"round": 6, "winner": "blue", "win_condition": "elimination"},
+          {"round": 7, "winner": "blue", "win_condition": "elimination"},
+          {"round": 8, "winner": "blue", "win_condition": "objective"},
+          {"round": 9, "winner": "blue", "win_condition": "elimination"}
+        ]
+      },
+      "expect": {"starting_side": "DEF", "half1": [4, 2], "we_won": [1, 4, 5, 6, 7, 8, 9]}
+    },
+    {
+      "file": "Tom_Clancy_s_Rainbow_Six__Siege2026-9-17-22-27-41.jpg",
+      "map": "CHALET", "score": [7, 1], "our_block": "top",
+      "round_strip": {
+        "blue_block": "top", "blue_team_first_half_side": "ATK",
+        "rounds": [
+          {"round": 1, "winner": "blue", "win_condition": "elimination"},
+          {"round": 2, "winner": "blue", "win_condition": "elimination"},
+          {"round": 3, "winner": "blue", "win_condition": "elimination"},
+          {"round": 4, "winner": "blue", "win_condition": "objective"},
+          {"round": 5, "winner": "blue", "win_condition": "elimination"},
+          {"round": 6, "winner": "red",  "win_condition": "objective"},
+          {"round": 7, "winner": "blue", "win_condition": "elimination"},
+          {"round": 8, "winner": "blue", "win_condition": "elimination"}
+        ]
+      },
+      "expect": {"starting_side": "ATK", "half1": [5, 1], "we_won": [1, 2, 3, 4, 5, 7, 8]}
+    }
+  ]
+}

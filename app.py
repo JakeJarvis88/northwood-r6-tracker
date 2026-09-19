@@ -14,6 +14,29 @@ from ui.common import conn
 
 st.set_page_config(page_title="Northwood R6 Tracker", page_icon="🎯", layout="wide")
 
+# Tactile button feedback: buttons dip and flash green on press, and the toast that
+# follows a save slides in rather than appearing abruptly.
+st.markdown("""
+<style>
+.stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+    transition: transform .06s ease, background-color .15s ease, border-color .15s ease,
+                box-shadow .15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover {
+    border-color: #3FB68B; box-shadow: 0 0 0 1px rgba(63,182,139,.35);
+}
+.stButton > button:active, .stDownloadButton > button:active, .stFormSubmitButton > button:active {
+    transform: translateY(2px) scale(.985);
+    background-color: #3FB68B !important; border-color: #3FB68B !important;
+    color: #0b1b15 !important; box-shadow: 0 0 0 3px rgba(63,182,139,.28);
+}
+.stButton > button:focus:not(:active) { border-color: #3FB68B; }
+div[data-testid="stToast"] { animation: nwslide .22s ease-out; }
+@keyframes nwslide { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+div[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }
+</style>
+""", unsafe_allow_html=True)
+
 UNASSIGNED = "(unassigned / opponent)"
 MATCH_TYPES = ["Gameday", "Scrim"]
 

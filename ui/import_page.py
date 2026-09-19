@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from siegestats import db, matching, reader, dedupe, gsheets, insights, sides, rating, opbans
+from siegestats import db, matching, reader, dedupe, gsheets, insights, sides, rating, opbans, operators
 from ui.common import (conn, our_id, UNASSIGNED, MATCH_TYPES, series_label, list_series,
                        roster_names, player_id_by_name, map_options, to_int, toast, try_autosync, bump)
 
@@ -266,25 +266,31 @@ def review_one(fname, ex, sid, opp_id, opp_name):
     ot_side = s4.selectbox("OT started on", side_opts, key=f"ots_{fname}", disabled=not went_ot,
                            help="Only needed past regulation. Whoever picked the map chooses it.")
 
-    # Re-derive round sides against the side the user actually confirmed
-    if strip_rows and start_side != "Unknown":
-        strip_rows, _ = sides.rounds_from_strip(
-            rs, our_block_is_top=(our_side == 0), starting_side=start_side,
-            ot_starting_side=None if ot_side == "Unknown" else ot_side, rounds_per_half=rph)
+    # The score is the source of truth: reconcile the strip to it, then label sides.
+    fix_notes = []
+    if strip_rows:
+        raw_n = len(strip_rows)
+        raw_w = sum(1 for r in strip_rows if r.get("won") == 1)
+        strip_rows, fix_notes = sides.reconcile_rounds(strip_rows, rw, rl)
+        if start_side != "Unknown":
+            strip_rows = sides.apply_sides(strip_rows, start_side,
+                                           None if ot_side == "Unknown" else ot_side, rph)
     auto_h1 = sides.halves_from_rounds(strip_rows, rph) if strip_rows else (None, None)
-    strip_err = sides.strip_consistency(strip_rows, rw, rl) if strip_rows else None
+    strip_err = None
 
     if strip_rows:
         won_n = sum(1 for r in strip_rows if r["won"] == 1)
-        st.success(f"📊 Round strip read: **{len(strip_rows)} rounds**, we won **{won_n}**"
+        st.success(f"📊 Round strip: **{len(strip_rows)} rounds**, we won **{won_n}**"
                    + (f" · half 1 = **{auto_h1[0]}-{auto_h1[1]}**" if auto_h1[0] is not None else ""),
                    icon="✅")
-        if strip_err:
-            st.error(strip_err, icon="🚫")
+        if fix_notes:
+            st.warning("Adjusted to match the {}-{} scoreboard (it read {} rounds, {} wins): ".format(
+                rw, rl, raw_n, raw_w) + "; ".join(fix_notes), icon="🔧")
         with st.expander(f"Round-by-round ({len(strip_rows)} rounds) — correct anything misread"):
             rdf = pd.DataFrame([{"Round": r["round_number"],
                                  "Result": "Won" if r["won"] == 1 else ("Lost" if r["won"] == 0 else "?"),
                                  "Side": r["side"] or "?", "How": r["win_condition"],
+                                 "Source": r.get("source", "read"),
                                  "Conf": r["confidence"]} for r in strip_rows])
             rdf = st.data_editor(
                 rdf, key=f"rounds_{fname}", width="stretch", hide_index=True, num_rows="dynamic",
@@ -292,12 +298,16 @@ def review_one(fname, ex, sid, opp_id, opp_name):
                     "Result": st.column_config.SelectboxColumn(options=["Won", "Lost", "?"]),
                     "Side": st.column_config.SelectboxColumn(options=["ATK", "DEF", "?"]),
                     "How": st.column_config.SelectboxColumn(
-                        options=["elimination", "time", "defuse", "disabled", "unknown"]),
+                        options=["elimination", "objective", "time", "unknown"],
+                        help="elimination = team wipe · objective = plant/defuse/secure · time = clock ran out"),
+                    "Source": st.column_config.TextColumn(disabled=True,
+                        help="read = from the screenshot · inferred/corrected = filled in to match the score"),
                     "Conf": st.column_config.NumberColumn(disabled=True, format="%.2f")})
             strip_rows = [{"round_number": int(r["Round"]),
                            "won": 1 if r["Result"] == "Won" else (0 if r["Result"] == "Lost" else None),
                            "side": None if r["Side"] == "?" else r["Side"],
-                           "win_condition": r["How"], "confidence": r["Conf"]}
+                           "win_condition": r["How"], "confidence": r["Conf"],
+                           "source": r.get("Source", "read")}
                           for _, r in rdf.iterrows() if pd.notna(r["Round"])]
             auto_h1 = sides.halves_from_rounds(strip_rows, rph)
         h1w = auto_h1[0] if auto_h1[0] is not None else 0
@@ -364,13 +374,25 @@ def review_one(fname, ex, sid, opp_id, opp_name):
                        "slot it filled, so place them yourself below if they look right.")
         st.caption("Side = the banned operator's own side. Leave rows blank if you didn't record "
                    "them; they can be filled in later under Manage → Data.")
-        ob_edit = st.data_editor(
-            opbans.seed_rows("Northwood", opp_name or "Opponent"),
-            key=f"ob_{fname}", width="stretch", hide_index=True,
-            column_config={"Team": st.column_config.TextColumn(disabled=True),
-                           "Side": st.column_config.TextColumn(disabled=True),
-                           "Slot": st.column_config.TextColumn(disabled=True),
-                           "Operator": st.column_config.TextColumn()})
+        seed = opbans.seed_rows("Northwood", opp_name or "Opponent")
+        parts = []
+        cATK, cDEF = st.columns(2)
+        for col, side in ((cATK, "ATK"), (cDEF, "DEF")):
+            with col:
+                st.caption(f"**{side} bans** — {'attackers' if side == 'ATK' else 'defenders'} "
+                           f"removed from whoever attacks" if side == "ATK" else
+                           f"**{side} bans** — defenders removed from whoever defends")
+                sub = seed[seed["Side"] == side].reset_index(drop=True)
+                parts.append(st.data_editor(
+                    sub, key=f"ob_{side}_{fname}", width="stretch", hide_index=True,
+                    column_config={
+                        "Team": st.column_config.TextColumn(disabled=True),
+                        "Side": None,
+                        "Slot": st.column_config.TextColumn(disabled=True),
+                        "Operator": st.column_config.SelectboxColumn(
+                            options=operators.for_side(conn, side),
+                            help=f"{side} operators only")}).assign(Side=side))
+        ob_edit = pd.concat(parts, ignore_index=True)
 
     # manual stats the scoreboard cannot provide ----------------------------
     with st.expander("✋ 1vX clutches and plants (manual — not on the scoreboard)"):
@@ -384,8 +406,10 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         man_edit = st.data_editor(
             man_seed, key=f"man_{fname}", width="stretch", hide_index=True,
             column_config={"Player": st.column_config.TextColumn(disabled=True),
-                           "1vX": st.column_config.NumberColumn(min_value=0, max_value=20, step=1),
-                           "Plants": st.column_config.NumberColumn(min_value=0, max_value=20, step=1)})
+                           "1vX": st.column_config.SelectboxColumn(options=list(range(0, 15)),
+                                                                   help="Whole numbers 0-14"),
+                           "Plants": st.column_config.SelectboxColumn(options=list(range(0, 15)),
+                                                                      help="Whole numbers 0-14")})
 
     # integrity checks ------------------------------------------------------
     checks = insights.validate_scoreboard(edited.to_dict("records"), rw, rl)
@@ -563,11 +587,23 @@ def opban_grid(map_game_id, opp_id, opp_name, key=""):
                     idx = list(grid[mask].index)
                     for i, op in zip(idx, ops):
                         grid.at[i, "Operator"] = op
-    ed = st.data_editor(grid, key=f"obgrid_{key}_{map_game_id}", width="stretch", hide_index=True,
-                        column_config={"Team": st.column_config.TextColumn(disabled=True),
-                                       "Side": st.column_config.TextColumn(disabled=True),
-                                       "Slot": st.column_config.TextColumn(disabled=True),
-                                       "Operator": st.column_config.TextColumn()})
+    parts = []
+    cA, cB = st.columns(2)
+    for col, side in ((cA, "ATK"), (cB, "DEF")):
+        with col:
+            st.caption(f"**{side} bans**")
+            sub = grid[grid["Side"] == side].reset_index(drop=True)
+            picked = [o for o in sub["Operator"].tolist() if o]
+            opts = operators.for_side(conn, side)
+            opts = opts + [o for o in picked if o not in opts]   # keep custom entries selectable
+            parts.append(st.data_editor(
+                sub, key=f"obgrid_{key}_{side}_{map_game_id}", width="stretch", hide_index=True,
+                column_config={"Team": st.column_config.TextColumn(disabled=True),
+                               "Side": None,
+                               "Slot": st.column_config.TextColumn(disabled=True),
+                               "Operator": st.column_config.SelectboxColumn(
+                                   options=opts, help=f"{side} operators only")}).assign(Side=side))
+    ed = pd.concat(parts, ignore_index=True)
     if st.button("💾 Save operator bans", key=f"obsave_{key}_{map_game_id}"):
         conn.execute("DELETE FROM operator_bans WHERE map_game_id=?", (map_game_id,))
         for _, r in ed.iterrows():

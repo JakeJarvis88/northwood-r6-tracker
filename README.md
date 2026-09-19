@@ -218,6 +218,15 @@ breakdown whenever it bites.
 Record 1vX and plants for every Northwood player in a map or none of them; mixing
 within one map makes those ratings non-comparable.
 
+### Reader accuracy fixtures
+
+`tests/strip_fixtures.json` holds hand-verified ground truth for five real
+scoreboards (round winners, how each round ended, starting side, half scores),
+including a Blue/Orange replay where the orange team is listed first. The
+parser is unit-tested against all five. `tests/check_reader.py` runs the *live*
+reader on those screenshots and prints a scorecard — run it after changing the
+prompt or model, before trusting a new configuration on a real match.
+
 ## Gameday vs scrim
 
 Every series is tagged **Gameday** (official/league) or **Scrim** (practice).

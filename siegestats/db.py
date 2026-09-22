@@ -4,10 +4,69 @@ The database (data/siege.db) is the single source of truth.
 Excel is only an export/report format (see export_excel.py).
 """
 import os
+import shutil
 import sqlite3
+import tempfile
 from datetime import date
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "siege.db")
+REPO_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "siege.db")
+
+
+def _writable_dir(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _db_writable(path):
+    """The only reliable test: try to take a write lock on the actual file."""
+    try:
+        c = sqlite3.connect(path, timeout=5)
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("ROLLBACK")
+        c.close()
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def resolve_db_path():
+    """Pick a database location that is actually writable.
+
+    Locally that's data/siege.db next to the code. On hosted platforms the code
+    checkout can be read-only (Streamlit Cloud mounts it under /mount/src), and
+    a database committed to git may arrive without write permission. In that
+    case the database lives in a writable runtime directory instead; if a
+    repo copy exists it is carried over on first boot so seeded data isn't lost.
+    The durable copy is always the Google Sheets backup, never the local file.
+    """
+    env = os.environ.get("SIEGE_DB_PATH")
+    if env:
+        return env
+    repo_dir = os.path.dirname(REPO_DB)
+    if _writable_dir(repo_dir) and _db_writable(REPO_DB):
+        return REPO_DB
+    runtime_dir = os.path.join(os.path.expanduser("~"), ".northwood_siege")
+    if not _writable_dir(runtime_dir):
+        runtime_dir = os.path.join(tempfile.gettempdir(), "northwood_siege")
+        os.makedirs(runtime_dir, exist_ok=True)
+    runtime_db = os.path.join(runtime_dir, "siege.db")
+    if not os.path.exists(runtime_db) and os.path.exists(REPO_DB):
+        try:
+            shutil.copyfile(REPO_DB, runtime_db)
+            os.chmod(runtime_db, 0o644)
+        except OSError:
+            pass
+    return runtime_db
+
+
+DB_PATH = resolve_db_path()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
@@ -154,9 +213,15 @@ CREATE TABLE IF NOT EXISTS settings (
 def get_conn(path: str = None) -> sqlite3.Connection:
     path = path or DB_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    # timeout: wait for a lock instead of failing instantly; Streamlit serves
+    # sessions from threads that share this one connection.
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")   # readers never block the writer
+    except sqlite3.OperationalError:
+        pass                                          # some mounted filesystems refuse WAL
     conn.executescript(SCHEMA)
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(series)")]
     if "finalized" not in cols:

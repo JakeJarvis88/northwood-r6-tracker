@@ -4,10 +4,11 @@ import os
 import pandas as pd
 import streamlit as st
 
-from siegestats import db, reader, stats, export_excel, sides, rating, store, operators
+from siegestats import db, ghstore, reader, stats, export_excel, sides, rating, store, operators
 from ui.import_page import veto_editor, opban_grid
 from ui.common import (conn, our_id, series_label, list_series, map_options,
-                       roster_names, player_id_by_name, toast, try_autosync, full_sync, bump)
+                       roster_names, player_id_by_name, toast, try_autosync, full_sync, bump,
+                       github_config, push_to_github)
 
 def render_manage():
     st.title("⚙️ Manage")
@@ -91,7 +92,41 @@ def render_manage():
                 toast("Alternate name added", "➕")
 
     with t[3]:
-        st.markdown("**Google Sheets** (team-facing copy)")
+        st.markdown("**GitHub storage** — what keeps your data between restarts")
+        gh_token, gh_repo = github_config()
+        if not ghstore.configured(gh_token, gh_repo):
+            st.warning("Not configured. Without it, everything you import is lost whenever the "
+                       "app restarts or sleeps. Add `github_token` and `github_repo` to the app's "
+                       "Secrets — see NO_PYTHON_SETUP.md.", icon="⚠️")
+        else:
+            ok, why = ghstore.check(gh_token, gh_repo)
+            (st.success if ok else st.error)(why)
+            exists, size, _ = (False, 0, None)
+            if ok:
+                try:
+                    exists, size, _ = ghstore.remote_info(gh_token, gh_repo)
+                except Exception:
+                    pass
+            st.caption(f"Repo: `{gh_repo}` · stored copy: "
+                       + (f"{size // 1024} KB" if exists else "none yet")
+                       + f" · last save: {db.get_setting(conn, 'gh_last_push') or 'never'}")
+            gc1, gc2 = st.columns(2)
+            if gc1.button("💾 Save database to GitHub now", disabled=not ok):
+                if push_to_github():
+                    st.success("Saved. It will be restored automatically after a restart.")
+            if gc2.button("⬇️ Load database from GitHub", disabled=not (ok and exists),
+                          help="Replaces this session's data with the stored copy."):
+                try:
+                    n = ghstore.pull(gh_token, gh_repo, db.DB_PATH)
+                    st.cache_resource.clear()
+                    st.cache_data.clear()
+                    bump()
+                    toast(f"Loaded {n // 1024} KB from GitHub", "⬇️")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Load failed: {e}")
+        st.markdown("---")
+        st.markdown("**Google Sheets** (optional — a readable copy for the team)")
         gs_url, gs_creds = db.get_setting(conn, "gs_sheet"), db.get_setting(conn, "gs_creds")
         last = db.get_setting(conn, "gs_last_sync")
         st.caption(f"Last sync: {last or 'never'}" + ("" if gs_url else " · configure it under Settings first"))

@@ -64,8 +64,8 @@ VETO = [  # seq, team ('us'/'opp'/None), action, map
 ]
 
 
-def main():
-    conn = db.get_conn()
+def main(conn=None):
+    conn = conn or db.get_conn()
     nu = db.get_or_create_team(conn, "Northwood", is_us=1)
     cu = db.get_or_create_team(conn, "Cumberland", is_us=0)
     conn.execute("INSERT INTO team_aliases(team_id, alt_name) SELECT ?, 'Cumberland Uni' "

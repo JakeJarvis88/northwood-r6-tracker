@@ -51,21 +51,51 @@ ANTHROPIC_API_KEY = "sk-ant-..."
 **You now have a URL.** It asks for a password; use your editor password. The roster,
 map pool and the Cumberland match are created automatically on first boot.
 
-## Step 3 — Make the data permanent (important, 20 min)
+## If the app shows "Database problem"
 
-Streamlit's free tier gives you no permanent disk: whenever the app restarts, anything
-you imported is gone unless it has been copied out. Pick one.
+The hosting platform sometimes won't let the app write inside the code checkout.
+The app detects that and moves the database to a writable spot automatically. If
+it still complains, add this line to **Secrets** and reboot:
 
-**Option A — Google Sheets (recommended).** Follow *Step 2 and Step 3* of `DEPLOY.md`.
-Once the Sheet is connected and auto-sync is ticked, every import writes a full backup
-there and the app rebuilds from it on every boot. Your team also gets a readable
-spreadsheet out of it.
+```toml
+SIEGE_DB_PATH = "/tmp/northwood/siege.db"
+```
 
-**Option B — manual backups.** After importing, go to **Manage → Data → Download
-siege.db backup**. To restore after a restart, **Manage → Data → Restore from a
-backup file** and upload that file. This works, but it's on you to remember.
+Either way the local file is disposable — Google Sheets is the durable copy.
 
-Do Option A if you want to stop thinking about it.
+## Step 3 — Make the data permanent (5 min, do not skip)
+
+Streamlit's free tier gives the app no permanent disk: when it restarts or wakes
+from sleep, anything you imported is gone. Fix it with a GitHub token — the app
+then commits its database back to your repo after every save and reloads it on
+boot. You get free version history too.
+
+1. On GitHub: click your avatar → **Settings** → scroll to **Developer settings**
+   (bottom left) → **Personal access tokens** → **Fine-grained tokens** →
+   **Generate new token**.
+2. Set:
+   - **Token name**: anything, e.g. `tracker`
+   - **Expiration**: 1 year (set a reminder; the app will tell you when it expires)
+   - **Repository access**: *Only select repositories* → your tracker repo
+   - **Permissions** → *Repository permissions* → **Contents** → **Read and write**
+3. **Generate token** and copy it (shown once).
+4. In Streamlit: your app → **⋮ → Settings → Secrets** → add these two lines to
+   what's already there:
+
+```toml
+github_token = "github_pat_..."
+github_repo = "your-username/northwood-r6-tracker"
+```
+
+5. Save. The app reboots. Go to **Manage → Data** — the GitHub section should say
+   *Connected*. Click **💾 Save database to GitHub now** once to seed the stored copy.
+
+From then on it saves automatically every time you confirm an import or finalize a
+match. To verify it works: reboot the app (**⋮ → Reboot**) and check your data is
+still there.
+
+**Google Sheets is optional now.** Add it later if you want your team reading a
+spreadsheet; it's no longer needed for the data to survive.
 
 ## Step 4 — Send it to the team
 

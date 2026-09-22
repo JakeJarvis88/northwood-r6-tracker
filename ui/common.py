@@ -10,7 +10,7 @@ re-queried when the data hasn't moved.
 import pandas as pd
 import streamlit as st
 
-from siegestats import db, gsheets, opbans, stats, store
+from siegestats import db, ghstore, gsheets, opbans, stats, store
 
 UNASSIGNED = "(unassigned / opponent)"
 MATCH_TYPES = ["Gameday", "Scrim"]
@@ -124,9 +124,41 @@ def toast(msg, icon="✅"):
         st.success(msg)
 
 
+def _secret(key, default=None):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return default
+
+
+def github_config():
+    return _secret("github_token"), _secret("github_repo")
+
+
+def push_to_github(quiet=False):
+    """Commit the database back to the repo, if a token is configured."""
+    token, repo = github_config()
+    if not ghstore.configured(token, repo):
+        return False
+    try:
+        with st.spinner("Saving to GitHub…"):
+            ghstore.push(token, repo, db.DB_PATH, message="Tracker update from the app")
+        db.set_setting(conn, "gh_last_push", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"))
+        if not quiet:
+            toast("Saved to GitHub", "💾")
+        return True
+    except Exception as e:
+        st.warning(f"Saved in this session, but the GitHub save failed: {e}")
+        return False
+
+
 def try_autosync(quiet=False):
-    """Push to Google Sheets after a write if auto-sync is on. Never blocks the save."""
+    """Persist after a write. GitHub first (that's what survives a restart),
+    then Google Sheets if it's configured. Never blocks the save itself."""
     bump()
+    push_to_github(quiet=quiet)
     if db.get_setting(conn, "gs_autosync") != "1":
         return
     url, creds = db.get_setting(conn, "gs_sheet"), db.get_setting(conn, "gs_creds")

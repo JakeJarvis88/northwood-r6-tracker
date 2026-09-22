@@ -8,7 +8,7 @@ import os
 
 import streamlit as st
 
-from siegestats import db, store
+from siegestats import db, ghstore, store
 from ui.common import conn
 
 
@@ -105,6 +105,16 @@ def cloud_bootstrap():
         db.set_setting(conn, "gs_sheet", str(sheet))
         db.set_setting(conn, "gs_creds", str(creds))
     msg = None
+    gh_token, gh_repo = _secret("github_token"), _secret("github_repo")
+    if ghstore.configured(gh_token, gh_repo):
+        try:
+            if store.is_empty(conn):
+                n = ghstore.pull(gh_token, gh_repo, db.DB_PATH)
+                if n:
+                    st.cache_resource.clear()
+                    return f"Loaded the team database from GitHub ({n // 1024} KB)."
+        except Exception as e:
+            msg = f"Couldn't load the database from GitHub: {e}"
     if sheet and creds and os.path.exists(str(creds)):
         try:
             if store.is_empty(conn) and store.has_backup(sheet, creds):
@@ -115,7 +125,7 @@ def cloud_bootstrap():
     if db.our_team_id(conn) is None:
         try:
             import seed
-            seed.main()
+            seed.main(conn)
             return (msg + " " if msg else "") + "First run — roster and map pool created."
         except Exception as e:
             return (msg + " " if msg else "") + f"Could not seed the roster: {e}"
@@ -144,9 +154,18 @@ st.sidebar.markdown("---")
 
 from ui import import_page, dashboards, manage  # noqa: E402  (after auth + bootstrap)
 
-if page.startswith("📥"):
-    import_page.render_import()
-elif page.startswith("📊"):
-    dashboards.render_dashboards()
-else:
-    manage.render_manage()
+import sqlite3  # noqa: E402
+
+try:
+    if page.startswith("📥"):
+        import_page.render_import()
+    elif page.startswith("📊"):
+        dashboards.render_dashboards()
+    else:
+        manage.render_manage()
+except sqlite3.OperationalError as e:
+    st.error(f"Database problem: {e}\n\nDatabase file: `{db.DB_PATH}`. "
+             "If this says read-only, the hosting platform won't let the app write there — "
+             "set the SIEGE_DB_PATH secret to a writable path such as /tmp/siege.db and reboot. "
+             "If it says locked, wait a moment and retry; if it persists, reboot the app.")
+    st.stop()

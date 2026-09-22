@@ -1,4 +1,5 @@
 """Import Match page: series, screenshots, review cards, veto, finalize."""
+import hashlib
 import os
 from datetime import date
 
@@ -7,7 +8,8 @@ import streamlit as st
 
 from siegestats import db, matching, reader, dedupe, gsheets, insights, sides, rating, opbans, operators
 from ui.common import (conn, our_id, UNASSIGNED, MATCH_TYPES, series_label, list_series,
-                       roster_names, player_id_by_name, map_options, to_int, toast, try_autosync, bump)
+                       roster_names, player_id_by_name, map_options, to_int, toast, try_autosync, bump,
+                       last_action_line, reset_widgets)
 
 def edit_series_form(series):
     """Edit an existing series: opponent, competition, date, format, match type, etc."""
@@ -54,6 +56,7 @@ def edit_series_form(series):
 
 def render_import():
     st.title("📥 Import Match")
+    last_action_line()
 
     # ---- 1. series ----------------------------------------------------------
     st.subheader("1 · Series")
@@ -113,7 +116,9 @@ def render_import():
                              accept_multiple_files=True)
     st.session_state.setdefault("extractions", {})
     cols = st.columns(2)
-    pending_files = [f for f in (files or []) if f.name not in st.session_state["extractions"]]
+    def _cid(f):  # stable, collision-free card id: content hash, not filename
+        return hashlib.md5(f.getvalue()).hexdigest()[:10]
+    pending_files = [f for f in (files or []) if _cid(f) not in st.session_state["extractions"]]
     if files and api_key and cols[0].button(
             f"🔍 Read {len(pending_files)} screenshot{'s' if len(pending_files) != 1 else ''}",
             type="primary", disabled=not pending_files):
@@ -123,7 +128,8 @@ def render_import():
                 st.write(f"{i}/{len(pending_files)} · {f.name}")
                 try:
                     ex = reader.read_screenshot(f.getvalue(), f.name, api_key=api_key, model=model)
-                    st.session_state["extractions"][f.name] = ex
+                    ex["_file"] = f.name
+                    st.session_state["extractions"][_cid(f)] = ex
                     n_players = sum(len(t.get("players", [])) for t in ex.get("teams", []))
                     n_rounds = len((ex.get("round_strip") or {}).get("rounds") or [])
                     st.write(f"   ✓ {ex.get('map') or '?'} · {n_players} players · {n_rounds} rounds read")
@@ -136,27 +142,37 @@ def render_import():
             toast(f"{ok} screenshot(s) read — scroll down to review", "🔍")
     if cols[1].button("✍️ Add a manual (blank) map entry"):
         n = sum(1 for k in st.session_state["extractions"] if k.startswith("manual-"))
-        st.session_state["extractions"][f"manual-{n + 1}"] = reader.blank_extraction()
+        blank = reader.blank_extraction()
+        blank["_file"] = f"manual entry {n + 1}"
+        st.session_state["extractions"][f"manual{n + 1}"] = blank
         toast("Blank map added below — fill in the scoreboard", "✍️")
     if st.session_state["extractions"] and st.button("Clear all review cards", key="clear_ex"):
+        for cid in list(st.session_state["extractions"]):
+            reset_widgets(suffix=f"_{cid}")
         st.session_state["extractions"] = {}
+        toast("Review cards cleared", "🧹")
         st.rerun()
 
     # ---- 3. review & confirm -------------------------------------------------
     for fname, ex in list(st.session_state["extractions"].items()):
+        label = ex.get("_file", fname)
         if ex.get("_imported"):
             mg = ex["_imported"]
             cI, cU = st.columns([5, 1])
-            cI.success(f"✅ {fname} imported (map #{mg}).")
+            if mg == "skipped":
+                cI.info(f"⏭️ {label} skipped — nothing saved.")
+            else:
+                cI.success(f"✅ {label} imported (map #{mg}).")
             if isinstance(mg, int) and cU.button("↩️ Undo", key=f"undo_{fname}",
                                                  help="Deletes this map and its stats"):
                 db.delete_map(conn, mg)
                 del st.session_state["extractions"][fname]
+                reset_widgets(suffix=f"_{fname}")
                 bump()
                 toast(f"Map #{mg} removed", "↩️")
                 st.rerun()
             continue
-        with st.expander(f"Review: {fname}", expanded=True):
+        with st.expander(f"Review: {label}", expanded=True):
             review_one(fname, ex, sid, opp_id, opp_name)
 
     # ---- 4. vetoes & operator bans ------------------------------------------
@@ -439,12 +455,15 @@ def review_one(fname, ex, sid, opp_id, opp_name):
 
     override = False
     if blocking:
+        st.caption("Confirm is disabled until the errors above are fixed — or tick the override.")
         override = st.checkbox("Import anyway (I've verified these numbers are right)",
                                key=f"ovr_{fname}")
-    if st.button(f"✅ Confirm import ({fname})", type="primary", key=f"go_{fname}",
+    if st.button(f"✅ Confirm import ({ex.get('_file', fname)})", type="primary", key=f"go_{fname}",
                  disabled=bool(blocking) and not override):
         if action == "skip":
             ex["_imported"] = "skipped"
+            reset_widgets(suffix=f"_{fname}")
+            toast("Screenshot skipped", "⏭️")
             st.rerun()
         if not map_name:
             st.error("Map name is required.")
@@ -465,7 +484,7 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         mg_id = db.save_map_with_stats(
             conn, {"series_id": sid, "map_number": int(map_no), "map_name": map_name,
                    "result": result, "rounds_won": int(rw), "rounds_lost": int(rl),
-                   "siege_match_id": match_id.strip() or None, "source_file": fname,
+                   "siege_match_id": match_id.strip() or None, "source_file": ex.get("_file", fname),
                    "import_status": status,
                    "starting_side": None if start_side == "Unknown" else start_side,
                    "ot_starting_side": None if (ot_side == "Unknown" or not went_ot) else ot_side,
@@ -496,6 +515,7 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         conn.execute("UPDATE series SET finalized=0 WHERE series_id=?", (sid,))
         conn.commit()
         ex["_imported"] = mg_id
+        reset_widgets(suffix=f"_{fname}")   # drop the card's editor state so it can't leak
         toast(f"{map_name} {rw}-{rl} saved as map #{mg_id}" + (" (updated)" if action == "update" else ""),
               "🏆" if result == "W" else "💾")
         try_autosync()
@@ -616,5 +636,7 @@ def opban_grid(map_game_id, opp_id, opp_name, key=""):
                 (map_game_id, our_id() if r["Team"] == "Northwood" else opp_id, r["Side"],
                  opbans.label_to_slot(r["Slot"]), op))
         conn.commit()
+        reset_widgets(prefix=f"obgrid_{key}_")
         toast("Operator bans saved", "🚫")
         try_autosync()
+        st.rerun()

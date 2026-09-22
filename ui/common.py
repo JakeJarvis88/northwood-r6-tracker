@@ -118,10 +118,29 @@ def setting_int(key, default):
 
 # ------------------------------------------------------------------- feedback
 def toast(msg, icon="✅"):
+    """Transient toast + a persistent 'last action' line pages can show, so
+    feedback never depends on catching a toast before it fades."""
+    st.session_state["last_action"] = f"{icon} {msg} · {pd.Timestamp.now():%H:%M:%S}"
     try:
         st.toast(msg, icon=icon)
     except Exception:
         st.success(msg)
+
+
+def last_action_line():
+    la = st.session_state.get("last_action")
+    if la:
+        st.caption(f"Last action: {la}")
+
+
+def reset_widgets(*keys, prefix=None, suffix=None):
+    """Forget stored widget state. Streamlit's data_editor keeps edits as a diff
+    against the frame it was FIRST shown; if the underlying data changes (after a
+    save) those stale edits re-apply on top of the new data and look like they
+    landed somewhere else. Clearing the key after a save prevents that."""
+    for k in list(st.session_state.keys()):
+        if k in keys or (prefix and str(k).startswith(prefix)) or (suffix and str(k).endswith(suffix)):
+            del st.session_state[k]
 
 
 def _secret(key, default=None):

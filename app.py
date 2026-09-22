@@ -139,7 +139,8 @@ if _boot:
 if db.our_team_id(conn) is None:
     st.warning("No home team found - run `python seed.py` first (or add your team under Manage).")
 
-pages = ["📥 Import Match", "📊 Dashboards", "⚙️ Manage"] if ROLE == "editor" else ["📊 Dashboards"]
+pages = (["📥 Import Match", "✏️ Edit Matches", "📊 Dashboards", "⚙️ Manage"]
+         if ROLE == "editor" else ["📊 Dashboards"])
 if "_gopage" in st.session_state:
     st.session_state["page_nav"] = st.session_state.pop("_gopage")
 page = st.sidebar.radio("Page", pages, key="page_nav")
@@ -152,13 +153,15 @@ if _secret("editor_password") or _secret("viewer_password"):
         st.rerun()
 st.sidebar.markdown("---")
 
-from ui import import_page, dashboards, manage  # noqa: E402  (after auth + bootstrap)
+from ui import import_page, edit_page, dashboards, manage  # noqa: E402  (after auth + bootstrap)
 
 import sqlite3  # noqa: E402
 
 try:
     if page.startswith("📥"):
         import_page.render_import()
+    elif page.startswith("✏️"):
+        edit_page.render_edit()
     elif page.startswith("📊"):
         dashboards.render_dashboards()
     else:

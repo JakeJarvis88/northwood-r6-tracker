@@ -5,8 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from siegestats import db, ghstore, reader, stats, export_excel, sides, rating, store, operators
-from ui.import_page import veto_editor, opban_grid
-from ui.common import (conn, our_id, series_label, list_series, map_options,
+from ui.common import (conn, our_id, series_label, list_series,
                        roster_names, player_id_by_name, toast, try_autosync, full_sync, bump,
                        github_config, push_to_github)
 
@@ -210,108 +209,10 @@ def render_manage():
                     toast("Side data saved", "🗡️")
                 try_autosync()
         st.markdown("---")
-        st.markdown("### ✏️ Edit a past match")
-        srs_all = list_series()
-        if srs_all:
-            spick2 = st.selectbox("Series", [series_label(r) for r in srs_all], key="editsrs")
-            srow2 = srs_all[[series_label(r) for r in srs_all].index(spick2)]
-            sid2, oid2, onm2 = srow2["series_id"], srow2["opponent_id"], srow2["opponent"]
-            et0, et1, et2 = st.tabs(["🎯 Map & score", "🗺️ Map bans (veto)", "🚫 Operator bans"])
-            with et0:
-                m0 = pd.read_sql_query(
-                    """SELECT map_game_id, map_number, map_name, rounds_won, rounds_lost,
-                              starting_side, import_status, siege_match_id
-                       FROM maps_played WHERE series_id=? ORDER BY map_number""",
-                    conn, params=(sid2,))
-                if m0.empty:
-                    st.caption("No maps in this series yet.")
-                else:
-                    st.caption("Fix a map uploaded under the wrong name, score or order. "
-                               "Result and the series record recalculate on save.")
-                    ed0 = st.data_editor(
-                        m0, width="stretch", hide_index=True, key=f"mapedit_{sid2}",
-                        column_config={
-                            "map_game_id": st.column_config.NumberColumn("ID", disabled=True),
-                            "map_number": st.column_config.NumberColumn("Map #", min_value=1, max_value=5),
-                            "map_name": st.column_config.SelectboxColumn("Map", options=map_options()),
-                            "rounds_won": st.column_config.NumberColumn("Won", min_value=0, max_value=20),
-                            "rounds_lost": st.column_config.NumberColumn("Lost", min_value=0, max_value=20),
-                            "starting_side": st.column_config.SelectboxColumn(
-                                "Started", options=["ATK", "DEF"]),
-                            "import_status": st.column_config.SelectboxColumn(
-                                "Status", options=["confirmed", "in_progress", "needs_review"]),
-                            "siege_match_id": st.column_config.TextColumn("Match ID")})
-                    if st.button("💾 Save map details", key=f"savemaps_{sid2}"):
-                        for _, r in ed0.iterrows():
-                            rw_, rl_ = int(r["rounds_won"] or 0), int(r["rounds_lost"] or 0)
-                            res = "W" if rw_ > rl_ else ("L" if rl_ > rw_ else "T")
-                            conn.execute(
-                                """UPDATE maps_played SET map_number=?, map_name=?, rounds_won=?,
-                                   rounds_lost=?, result=?, starting_side=?, import_status=?,
-                                   siege_match_id=? WHERE map_game_id=?""",
-                                (int(r["map_number"] or 1), r["map_name"], rw_, rl_, res,
-                                 None if pd.isna(r["starting_side"]) else r["starting_side"],
-                                 r["import_status"],
-                                 None if pd.isna(r["siege_match_id"]) else r["siege_match_id"],
-                                 int(r["map_game_id"])))
-                        conn.commit()
-                        db.recalc_series(conn, sid2)
-                        bump()
-                        toast("Map details saved", "🎯")
-                        try_autosync()
-                        st.rerun()
-            with et1:
-                st.caption("Add, remove or re-sequence the veto for this series at any time.")
-                veto_editor(sid2, oid2, onm2)
-            with et2:
-                m2 = [dict(r) for r in conn.execute(
-                    "SELECT map_game_id, map_name FROM maps_played WHERE series_id=? ORDER BY map_number",
-                    (sid2,)).fetchall()]
-                if not m2:
-                    st.caption("No maps in this series yet.")
-                else:
-                    mp2 = st.selectbox("Map", m2, format_func=lambda r: r["map_name"], key="editobmap")
-                    opban_grid(mp2["map_game_id"], oid2, onm2, key="manage")
-        st.markdown("---")
-        st.markdown("**1vX & plants** — backfill maps already imported")
-        mrows = pd.read_sql_query(
-            """SELECT mp.map_game_id, s.date, t.name AS opponent, mp.map_name
-               FROM maps_played mp JOIN series s USING(series_id)
-               LEFT JOIN teams t ON s.opponent_id=t.team_id ORDER BY s.date, mp.map_number""", conn)
-        if mrows.empty:
-            st.caption("No maps stored yet.")
-        else:
-            lbl = {f"{r['date']} · {r['map_name']} vs {r['opponent']}": int(r["map_game_id"])
-                   for _, r in mrows.iterrows()}
-            pick_m = st.selectbox("Map", list(lbl.keys()), key="manmap")
-            mgid = lbl[pick_m]
-            cur = pd.read_sql_query(
-                """SELECT p.name AS Player, ms.clutches AS "1vX", ms.plants AS Plants
-                   FROM player_map_stats pms JOIN players p ON pms.player_id=p.player_id
-                   LEFT JOIN manual_stats ms ON ms.map_game_id=pms.map_game_id
-                        AND ms.player_id=pms.player_id
-                   WHERE pms.map_game_id=? AND pms.player_id IS NOT NULL ORDER BY p.name""",
-                conn, params=(mgid,))
-            if cur.empty:
-                st.caption("No Northwood players are mapped on this map.")
-            else:
-                man_ed = st.data_editor(
-                    cur, key=f"manedit_{mgid}", width="stretch", hide_index=True,
-                    column_config={"Player": st.column_config.TextColumn(disabled=True),
-                                   "1vX": st.column_config.NumberColumn(min_value=0, max_value=20),
-                                   "Plants": st.column_config.NumberColumn(min_value=0, max_value=20)})
-                if st.button("💾 Save 1vX & plants"):
-                    entries = []
-                    for _, r in man_ed.iterrows():
-                        pid = conn.execute("SELECT player_id FROM players WHERE name=?",
-                                           (r["Player"],)).fetchone()
-                        if pid:
-                            entries.append({"player_id": pid["player_id"],
-                                            "clutches": None if pd.isna(r["1vX"]) else int(r["1vX"]),
-                                            "plants": None if pd.isna(r["Plants"]) else int(r["Plants"])})
-                    rating.save_manual(conn, mgid, entries)
-                    toast("1vX and plants saved", "✋")
-                    try_autosync()
+        st.markdown("### ✏️ Editing past matches")
+        st.info("Everything about a saved match — map, score, sides, player lines, rounds, "
+                "1vX/plants, operator bans, veto — is now on the **✏️ Edit Matches** page in the "
+                "sidebar, one tab per map.", icon="👉")
         st.markdown("---")
         st.markdown("**Backup**")
         st.caption("The whole tracker lives in one file. Download it before a big change; "

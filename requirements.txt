@@ -1,7 +1,9 @@
-streamlit>=1.46
-pandas>=2.2
-altair>=5.0
-openpyxl>=3.1
+streamlit>=1.46,<2
+pandas>=2.2,<4
+altair>=5.0,<7
+openpyxl>=3.1,<4
+pillow>=10
 anthropic>=0.40
-gspread>=6.0
-google-auth>=2.30
+gspread>=6.0,<7
+google-auth>=2.30,<3
+requests>=2.31

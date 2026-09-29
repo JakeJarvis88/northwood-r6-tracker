@@ -13,6 +13,36 @@ import streamlit as st
 from siegestats import db, ghstore, gsheets, opbans, stats, store
 
 UNASSIGNED = "(unassigned / opponent)"
+
+# Container-level state set once at boot (see app.cloud_bootstrap).
+BOOT = {"gh_load_failed": None}
+
+
+def local_tz():
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(db.get_setting(conn, "timezone", "America/New_York") or "America/New_York")
+    except Exception:
+        return ZoneInfo("America/New_York")
+
+
+def now_local():
+    """The server runs on UTC; matches are played in the evening US Eastern time,
+    so 'today' would roll over to tomorrow after 8pm without this."""
+    return pd.Timestamp.now(tz=local_tz())
+
+
+def shot_time(filename):
+    """Siege names screenshots '...Siege2026-9-16-21-49-42.jpg'. Returns that
+    timestamp, or None for any other naming."""
+    import re
+    m = re.search(r"(20\d\d)-(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{1,2})-(\d{1,2})", filename or "")
+    if not m:
+        return None
+    try:
+        return pd.Timestamp(*[int(x) for x in m.groups()])
+    except ValueError:
+        return None
 MATCH_TYPES = ["Gameday", "Scrim"]
 
 
@@ -120,7 +150,7 @@ def setting_int(key, default):
 def toast(msg, icon="✅"):
     """Transient toast + a persistent 'last action' line pages can show, so
     feedback never depends on catching a toast before it fades."""
-    st.session_state["last_action"] = f"{icon} {msg} · {pd.Timestamp.now():%H:%M:%S}"
+    st.session_state["last_action"] = f"{icon} {msg} · {now_local():%H:%M:%S}"
     try:
         st.toast(msg, icon=icon)
     except Exception:
@@ -166,7 +196,7 @@ def persistence_banner():
     try:
         if True:
             c1.download_button("⬇️ Download backup now", db.snapshot_bytes(conn),
-                               f"siege_backup_{pd.Timestamp.now():%Y%m%d_%H%M}.db",
+                               f"siege_backup_{now_local():%Y%m%d_%H%M}.db",
                                type="primary", key=f"dlnow_{st.session_state.get('page_nav', '')}")
     except OSError:
         pass
@@ -226,11 +256,19 @@ def push_to_github(quiet=False):
     token, repo = github_config()
     if not ghstore.configured(token, repo):
         return False
+    if BOOT.get("gh_load_failed"):
+        # The stored copy couldn't be loaded at startup, so this session may be
+        # running on an empty or seed database. Saving now would overwrite the
+        # real data in the repo - refuse until a load succeeds.
+        st.session_state["gh_error"] = ("Saving is paused: the app couldn't load the stored database "
+                                        f"at startup ({BOOT['gh_load_failed']}), and saving now could "
+                                        "overwrite it. Manage → Data → Retry loading from GitHub.")
+        return False
     try:
         with st.spinner("Saving to GitHub…"):
             sha = ghstore.push_bytes(token, repo, db.snapshot_bytes(conn),
-                                     message=f"Tracker update {pd.Timestamp.now():%Y-%m-%d %H:%M}")
-        stamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+                                     message=f"Tracker update {now_local():%Y-%m-%d %H:%M}")
+        stamp = now_local().strftime("%Y-%m-%d %H:%M")
         db.set_setting(conn, "gh_last_push", stamp)
         st.session_state.pop("gh_error", None)
         st.session_state["gh_last_ok"] = f"{stamp} · commit {str(sha)[:7]}"
@@ -238,7 +276,7 @@ def push_to_github(quiet=False):
             toast("Saved to GitHub", "💾")
         return True
     except Exception as e:
-        st.session_state["gh_error"] = f"{pd.Timestamp.now():%H:%M} — {e}"
+        st.session_state["gh_error"] = f"{now_local():%H:%M} — {e}"
         toast("GitHub save FAILED — see the red banner", "🚨")
         return False
 
@@ -257,7 +295,7 @@ def try_autosync(quiet=False):
         with st.spinner("Syncing to Google Sheets…"):
             gsheets.sync(conn, url, creds)
             store.push(conn, url, creds)
-        db.set_setting(conn, "gs_last_sync", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"))
+        db.set_setting(conn, "gs_last_sync", now_local().strftime("%Y-%m-%d %H:%M"))
         if not quiet:
             toast("Synced to Google Sheets", "☁️")
     except Exception as e:  # sync problems must never lose an import
@@ -269,7 +307,7 @@ def full_sync():
     url, creds = db.get_setting(conn, "gs_sheet"), db.get_setting(conn, "gs_creds")
     link = gsheets.sync(conn, url, creds)
     n = store.push(conn, url, creds)
-    db.set_setting(conn, "gs_last_sync", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"))
+    db.set_setting(conn, "gs_last_sync", now_local().strftime("%Y-%m-%d %H:%M"))
     bump()
     return link, n
 

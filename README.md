@@ -227,6 +227,16 @@ parser is unit-tested against all five. `tests/check_reader.py` runs the *live*
 reader on those screenshots and prints a scorecard — run it after changing the
 prompt or model, before trusting a new configuration on a real match.
 
+## Round analytics
+
+With round-by-round data stored, the dashboards add an HLTV-style **round
+history** (one row per map, a square per round: ✕ elimination, ✓ objective,
+⏱ time) on the Team, Maps and Opponents views, and a **When rounds are won**
+breakdown: opening round of each half, rounds 1-3 vs 4-6 (before vs after the
+final operator ban), and overtime — split by side. Importing a map that sets a
+personal best, series best, or league record triggers a celebration, and a
+finalized series gets a copy-ready **match recap** for Discord.
+
 ## Gameday vs scrim
 
 Every series is tagged **Gameday** (official/league) or **Scrim** (practice).

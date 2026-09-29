@@ -157,3 +157,39 @@ def veto_bars(vt: pd.DataFrame, height=240):
         x=alt.X("times:Q", title="Times"),
         color=alt.Color("action:N", legend=alt.Legend(orient="bottom", title=None)),
         tooltip=["map_name", "action", "times"])
+
+
+def round_history(rf: pd.DataFrame, height=None):
+    """HLTV-style round history: one row per map, one square per round, colored by
+    who won it, marked with how it ended."""
+    d = rf.copy()
+    d["Map"] = d["date"].astype(str) + " · " + d["map_name"] + " vs " + d["opponent"].fillna("?")
+    d["Result"] = d["won"].map({1: "Won", 0: "Lost"})
+    d["mark"] = d["win_condition"].map({"elimination": "✕", "objective": "✓", "time": "⏱"}).fillna("·")
+    order = (d.drop_duplicates("map_game_id").sort_values(["date", "map_number"], ascending=False)["Map"].tolist())
+    h = height or max(60, 30 * len(order))
+    base = alt.Chart(d).encode(
+        x=alt.X("round_number:O", title="Round", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Map:N", sort=order, title=None))
+    boxes = base.mark_rect(stroke="#1b1f27", strokeWidth=2).encode(
+        color=alt.Color("Result:N", scale=alt.Scale(domain=["Won", "Lost"], range=[WIN, LOSS]),
+                        legend=alt.Legend(orient="bottom", title=None)),
+        opacity=alt.condition(alt.datum.side == "ATK", alt.value(1.0), alt.value(0.7)),
+        tooltip=["Map", "round_number", "Result", "side", "win_condition"])
+    marks = base.mark_text(fontSize=12, color="white").encode(text="mark:N")
+    return (boxes + marks).properties(height=h)
+
+
+def phase_bars(ps: pd.DataFrame, height=260):
+    d = ps[ps["Side"] != "All"]
+    order = ["Opening round of a half", "Rounds 1-3 (before final ban)",
+             "Rounds 4-6 (after final ban)", "Overtime"]
+    bars = alt.Chart(d).mark_bar().encode(
+        x=alt.X("Moment:N", sort=order, title=None, axis=alt.Axis(labelAngle=0, labelLimit=160)),
+        xOffset="Side:N",
+        y=alt.Y("Win %:Q", scale=alt.Scale(domain=[0, 100])),
+        color=alt.Color("Side:N", scale=alt.Scale(domain=["ATK", "DEF"], range=[ATK, DEF]),
+                        legend=alt.Legend(orient="bottom", title=None)),
+        tooltip=["Moment", "Side", "Rounds", "Won", "Win %"]).properties(height=height)
+    half = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(color=NEUTRAL, strokeDash=[4, 4]).encode(y="y:Q")
+    return bars + half

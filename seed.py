@@ -64,13 +64,15 @@ VETO = [  # seq, team ('us'/'opp'/None), action, map
 ]
 
 
-def main(conn=None):
+def main(conn=None, include_matches=True):
     conn = conn or db.get_conn()
     nu = db.get_or_create_team(conn, "Northwood", is_us=1)
-    cu = db.get_or_create_team(conn, "Cumberland", is_us=0)
-    conn.execute("INSERT INTO team_aliases(team_id, alt_name) SELECT ?, 'Cumberland Uni' "
-                 "WHERE NOT EXISTS (SELECT 1 FROM team_aliases WHERE team_id=? AND alt_name='Cumberland Uni')",
-                 (cu, cu))
+    cu = None
+    if include_matches:
+        cu = db.get_or_create_team(conn, "Cumberland", is_us=0)
+        conn.execute("INSERT INTO team_aliases(team_id, alt_name) SELECT ?, 'Cumberland Uni' "
+                     "WHERE NOT EXISTS (SELECT 1 FROM team_aliases WHERE team_id=? AND alt_name='Cumberland Uni')",
+                     (cu, cu))
 
     for name, role, tags in ROSTER:
         row = conn.execute("SELECT player_id FROM players WHERE name=? AND team_id=?", (name, nu)).fetchone()
@@ -85,6 +87,9 @@ def main(conn=None):
         conn.execute("INSERT OR IGNORE INTO map_pool(map_name, season, active) VALUES(?,?,1)", (m, SEASON))
     conn.commit()
 
+    if not include_matches:
+        print("Seeded roster and map pool (no demo match).")
+        return
     if conn.execute("SELECT 1 FROM series WHERE date='2026-09-16' AND opponent_id=?", (cu,)).fetchone():
         print("Cumberland 9/16/2026 series already present - nothing to do.")
         return

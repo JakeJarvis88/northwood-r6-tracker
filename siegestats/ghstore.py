@@ -106,10 +106,10 @@ def pull_bytes(token, repo, path=DB_PATH_IN_REPO, branch=DATA_BRANCH):
     content = m.get("content")
     if content and m.get("encoding") == "base64":
         return base64.b64decode(content)
-    url = m.get("download_url")
-    if not url:
-        return None
-    resp = requests.get(url, headers=_headers(token), timeout=60)
+    # files over 1 MB come back without inline content: ask for the raw bytes
+    h = dict(_headers(token), Accept="application/vnd.github.raw")
+    resp = requests.get(f"{API}/repos/{normalize_repo(repo)}/contents/{path}", headers=h,
+                        params={"ref": branch} if branch else {}, timeout=120)
     resp.raise_for_status()
     return resp.content
 
@@ -219,4 +219,8 @@ def check(token, repo):
     if not r.json().get("permissions", {}).get("push", False):
         return False, "The token can read this repo but not write to it — set Contents to "\
                       "Read and write."
-    return True, "Connected. The database will be saved to this repo."
+    msg = f"Connected. The database is saved to the `{DATA_BRANCH}` branch of this repo."
+    exp = r.headers.get("github-authentication-token-expiration")
+    if exp:
+        msg += f" Token expires {exp[:10]} — set a reminder to renew it."
+    return True, msg

@@ -9,6 +9,12 @@ import sqlite3
 import tempfile
 from datetime import date
 
+import threading
+
+# Streamlit serves every session from threads that share one connection; this
+# serializes multi-statement writes so two people saving at once can't interleave.
+WRITE_LOCK = threading.RLock()
+
 REPO_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "siege.db")
 
 
@@ -343,11 +349,12 @@ def recalc_series(conn, series_id):
 def save_map_with_stats(conn, map_row: dict, stat_rows: list, replace_map_game_id=None):
     """Insert (or replace) one map + its player rows atomically. Returns map_game_id.
     Any failure rolls the whole thing back, so a half-written map can't exist."""
-    try:
-        return _save_map_with_stats(conn, map_row, stat_rows, replace_map_game_id)
-    except Exception:
-        conn.rollback()
-        raise
+    with WRITE_LOCK:
+        try:
+            return _save_map_with_stats(conn, map_row, stat_rows, replace_map_game_id)
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _save_map_with_stats(conn, map_row, stat_rows, replace_map_game_id=None):
@@ -499,8 +506,12 @@ def snapshot_bytes(conn) -> bytes:
     os.close(fd)
     try:
         dst = sqlite3.connect(tmp)
-        conn.commit()
-        conn.backup(dst)
+        with WRITE_LOCK:
+            conn.commit()
+            conn.backup(dst)
+        # never let an API key ride along into the repo
+        dst.execute("DELETE FROM settings WHERE key IN ('api_key')")
+        dst.commit()
         dst.execute("PRAGMA journal_mode = DELETE")  # single self-contained file
         dst.close()
         with open(tmp, "rb") as f:

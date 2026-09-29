@@ -87,14 +87,18 @@ def rate_players(conn, ours: pd.DataFrame, cfg=None) -> pd.DataFrame:
         kd = k / max(d, 1)
 
         mm = man[man["display_name"] == name] if not man.empty else pd.DataFrame()
-        plants = mm["plants"].sum() if not mm.empty and mm["plants"].notna().any() else None
-        clutch = mm["clutches"].sum() if not mm.empty and mm["clutches"].notna().any() else None
-        # only count maps that actually have manual data, so rates aren't diluted
-        man_maps = mm["map_game_id"].nunique() if not mm.empty else 0
-        man_rounds = (g[g["map_game_id"].isin(mm["map_game_id"])]["rounds_played"].sum()
-                      if not mm.empty else 0)
-        ppr = (plants / man_rounds) if (plants is not None and man_rounds) else None
-        cpm = (clutch / man_maps) if (clutch is not None and man_maps) else None
+        # Each stat is averaged only over maps where THAT stat was entered. A blank
+        # means "not tracked" and leaves the map out; it is never read as zero.
+        p_rows = mm[mm["plants"].notna()] if not mm.empty else mm
+        c_rows = mm[mm["clutches"].notna()] if not mm.empty else mm
+        plants = p_rows["plants"].sum() if not p_rows.empty else None
+        clutch = c_rows["clutches"].sum() if not c_rows.empty else None
+        p_rounds = (g[g["map_game_id"].isin(p_rows["map_game_id"])]["rounds_played"].sum()
+                    if not p_rows.empty else 0)
+        c_maps = c_rows["map_game_id"].nunique() if not c_rows.empty else 0
+        man_maps = max(p_rows["map_game_id"].nunique() if not p_rows.empty else 0, c_maps)
+        ppr = (plants / p_rounds) if (plants is not None and p_rounds) else None
+        cpm = (clutch / c_maps) if (clutch is not None and c_maps) else None
 
         parts = [
             ("KPR", kpr, cfg["kpr_base"], cfg["w_kpr"]),
@@ -119,7 +123,7 @@ def rate_players(conn, ours: pd.DataFrame, cfg=None) -> pd.DataFrame:
             "Plants/rnd": round(ppr, 3) if ppr is not None else None,
             "1vX/map": round(cpm, 2) if cpm is not None else None,
             "Components": f"{len(used)}/5",
-            "Manual maps": man_maps,
+            "Manual maps": f"{man_maps}/{maps}",
         })
     out = pd.DataFrame(rows)
     return out.sort_values("Rating", ascending=False, na_position="last")
@@ -174,3 +178,29 @@ def save_manual(conn, map_game_id, entries):
                DO UPDATE SET clutches=excluded.clutches, plants=excluded.plants""",
             (map_game_id, pid, c, p))
     conn.commit()
+
+
+def fill_blanks_with_zero(conn, map_game_id=None):
+    """Record 0 for every Northwood player with no 1vX/plants on a map (or on all
+    maps). Existing numbers are never touched. Returns rows written."""
+    q = """SELECT pms.map_game_id, pms.player_id FROM player_map_stats pms
+           JOIN teams t ON pms.team_id=t.team_id
+           WHERE t.is_us=1 AND pms.player_id IS NOT NULL"""
+    args = []
+    if map_game_id is not None:
+        q += " AND pms.map_game_id=?"
+        args.append(map_game_id)
+    n = 0
+    for r in conn.execute(q, args).fetchall():
+        cur = conn.execute("SELECT clutches, plants FROM manual_stats WHERE map_game_id=? AND player_id=?",
+                           (r["map_game_id"], r["player_id"])).fetchone()
+        if cur is None:
+            conn.execute("INSERT INTO manual_stats(map_game_id, player_id, clutches, plants) VALUES(?,?,0,0)",
+                         (r["map_game_id"], r["player_id"]))
+            n += 1
+        elif cur["clutches"] is None or cur["plants"] is None:
+            conn.execute("""UPDATE manual_stats SET clutches=COALESCE(clutches,0), plants=COALESCE(plants,0)
+                            WHERE map_game_id=? AND player_id=?""", (r["map_game_id"], r["player_id"]))
+            n += 1
+    conn.commit()
+    return n

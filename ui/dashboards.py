@@ -166,6 +166,22 @@ def team_tab(ours):
             cB.caption("Losing defense rounds to *defuse* or *time* points at site play; "
                        "losing them to *elimination* points at fights.")
 
+    rf = sides.round_frame(conn, ids, rph)
+    if not rf.empty:
+        st.markdown("### Round history")
+        recent_ids = (rf.drop_duplicates("map_game_id").sort_values(["date", "map_number"], ascending=False)
+                      ["map_game_id"].head(10).tolist())
+        st.altair_chart(charts.round_history(rf[rf["map_game_id"].isin(recent_ids)]), width="stretch")
+        st.caption("Last 10 maps. ✕ elimination · ✓ objective · ⏱ time. Brighter squares are attack rounds.")
+        ps = sides.phase_splits(conn, ids, rph)
+        if not ps.empty:
+            st.markdown("**When rounds are won**")
+            cA, cB = st.columns([3, 2])
+            cA.altair_chart(charts.phase_bars(ps), width="stretch")
+            cB.dataframe(ps, width="stretch", hide_index=True)
+            cB.caption("Rounds 4-6 come after the final operator ban of each half — a drop there "
+                       "means the final ban is hurting you.")
+
     st.markdown("### Form")
     recent = (ours.drop_duplicates("map_game_id")
               [["date", "opponent", "match_type", "map_name", "map_result", "rounds_won",
@@ -352,6 +368,11 @@ def opponents_tab(df, fdf, scope):
         if rows:
             _jump("sel_map", mb.iloc[rows[0]]["map_name"], "🗺️ Maps")
 
+    rfo = sides.round_frame(conn, o_ours["map_game_id"].unique().tolist(), setting_int("rounds_per_half", 6))
+    if not rfo.empty:
+        st.markdown("**Round history against them**")
+        st.altair_chart(charts.round_history(rfo), width="stretch")
+
     vf = vetoes()
     vf = vf[vf["opponent"] == opp] if not vf.empty else vf
     if not vf.empty:
@@ -430,6 +451,11 @@ def maps_tab(df, fdf):
         if not wc.empty:
             cB.altair_chart(charts.win_conditions(wc), width="stretch")
 
+    rfm = sides.round_frame(conn, mids, rph)
+    if not rfm.empty:
+        st.markdown("**Round history on this map**")
+        st.altair_chart(charts.round_history(rfm), width="stretch")
+
     cA, cB = st.columns(2)
     with cA:
         st.markdown("**Our players on this map**")
@@ -487,6 +513,13 @@ def opban_tab(ours):
             st.dataframe(t, width="stretch", hide_index=True)
     st.caption("A banned attacker is missing from whoever is attacking, so an opponent's attacker ban "
                "bites in our attack rounds — that's what *Side round win %* tracks. ⚠️ = fewer than 3 maps.")
+
+    ps = sides.phase_splits(conn, ids, setting_int("rounds_per_half", 6))
+    if not ps.empty:
+        fb = ps[ps["Moment"].str.startswith("Rounds")]
+        if not fb.empty:
+            st.markdown("**Before vs after the final ban** (rounds 1-3 vs 4-6 of each half)")
+            st.dataframe(fb, width="stretch", hide_index=True)
 
     st.markdown("**By ban set** — bans interact, so this groups maps by the whole combination")
     g1, g2 = st.columns(2)

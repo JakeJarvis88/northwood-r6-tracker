@@ -7,7 +7,7 @@ import streamlit as st
 from siegestats import db, ghstore, reader, stats, export_excel, sides, rating, store, operators
 from ui.common import (conn, our_id, series_label, list_series, persistence_banner,
                        roster_names, player_id_by_name, toast, try_autosync, full_sync, bump,
-                       github_config, push_to_github)
+                       github_config, push_to_github, BOOT)
 
 def render_manage():
     st.title("⚙️ Manage")
@@ -99,6 +99,28 @@ def render_manage():
                        "app restarts or sleeps. Add `github_token` and `github_repo` to the app's "
                        "Secrets — see NO_PYTHON_SETUP.md.", icon="⚠️")
         else:
+            if BOOT.get("gh_load_failed"):
+                st.error(f"Startup couldn't load the stored database ({BOOT['gh_load_failed']}). "
+                         "Saving is paused so the good copy in GitHub isn't overwritten.", icon="🚨")
+                if st.button("🔁 Retry loading from GitHub", type="primary"):
+                    try:
+                        import tempfile as _tf
+                        blob = ghstore.pull_bytes(gh_token, gh_repo)
+                        if blob:
+                            with _tf.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                                tmp.write(blob)
+                            n = db.restore_from_file(conn, tmp.name)
+                            msg = f"Loaded {n} series. Saving is re-enabled."
+                        else:
+                            msg = "Nothing stored yet. Saving is re-enabled."
+                        BOOT["gh_load_failed"] = None
+                        st.session_state.pop("gh_error", None)
+                        st.cache_data.clear()
+                        bump()
+                        toast(msg, "🔁")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Still failing: {e}")
             ok, why = ghstore.check(gh_token, gh_repo)
             (st.success if ok else st.error)(why)
             exists, size, _ = (False, 0, None)
@@ -215,6 +237,22 @@ def render_manage():
                     toast("Side data saved", "🗡️")
                 try_autosync()
         st.markdown("---")
+        st.markdown("### 0️⃣ 1vX & plants backfill")
+        missing = conn.execute(
+            """SELECT COUNT(*) c FROM player_map_stats pms JOIN teams t ON pms.team_id=t.team_id
+               LEFT JOIN manual_stats ms ON ms.map_game_id=pms.map_game_id AND ms.player_id=pms.player_id
+               WHERE t.is_us=1 AND pms.player_id IS NOT NULL
+                 AND (ms.id IS NULL OR ms.clutches IS NULL OR ms.plants IS NULL)""").fetchone()["c"]
+        st.caption(f"{missing} Northwood player-map line(s) have no 1vX/plants recorded. "
+                   "Only fill these with 0 if you really did track every map — otherwise a real "
+                   "clutch you never entered becomes a permanent zero.")
+        if st.button("Set every blank 1vX/plants to 0", disabled=missing == 0):
+            n = rating.fill_blanks_with_zero(conn)
+            bump()
+            toast(f"Filled {n} line(s) with 0", "0️⃣")
+            try_autosync()
+            st.rerun()
+        st.markdown("---")
         st.markdown("### ✏️ Editing past matches")
         st.info("Everything about a saved match — map, score, sides, player lines, rounds, "
                 "1vX/plants, operator bans, veto — is now on the **✏️ Edit Matches** page in the "
@@ -268,21 +306,42 @@ def render_manage():
 
     with t[4]:
         st.markdown("**Screenshot reader** (Anthropic API)")
-        key = st.text_input("API key", value=db.get_setting(conn, "api_key", ""), type="password",
-                            help="Stored in plain text inside data/siege.db on this machine. "
-                                 "Leave blank to use the ANTHROPIC_API_KEY environment variable instead.")
-        model_opts = ["claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5"]
-        cur_model = db.get_setting(conn, "model", reader.DEFAULT_MODEL)
+        import os as _os
+        from_secrets = bool(_os.environ.get("ANTHROPIC_API_KEY"))
+        if from_secrets:
+            st.success("Using the API key from the app's Secrets — the safest place for it.", icon="🔑")
+            key = db.get_setting(conn, "api_key", "")
+            if key:
+                st.warning("An older key is also saved in the database. It's never uploaded to GitHub, "
+                           "but you can clear it.", icon="🧹")
+                if st.button("Clear the stored key"):
+                    db.set_setting(conn, "api_key", "")
+                    toast("Stored key cleared", "🧹")
+                    st.rerun()
+        else:
+            key = st.text_input("API key", value=db.get_setting(conn, "api_key", ""), type="password",
+                                help="On the hosted app, put ANTHROPIC_API_KEY in Secrets instead. A key "
+                                     "typed here is kept in this session's database and is stripped "
+                                     "before anything is saved to GitHub.")
+        model_opts = list(reader.MODEL_CHOICES)
+        cur_model = reader.resolve_model(db.get_setting(conn, "model", reader.DEFAULT_MODEL))
         if cur_model not in model_opts:
             model_opts.insert(0, cur_model)
-        model = st.selectbox("Model", model_opts, index=model_opts.index(cur_model))
-        st.caption("Sonnet is the default — about two cents a scoreboard, so a full season is "
-                   "roughly a dollar. Billing is pay-as-you-go per request; there is no "
-                   "subscription and no monthly minimum. Haiku is cheaper if you ever want it.")
+        model = st.selectbox("Model", model_opts, index=model_opts.index(cur_model),
+                             help="Haiku is the cheapest. Each read sends a scoreboard crop plus a zoomed "
+                                  "round strip, which keeps Haiku accurate on the details it used to miss.")
+        crop_on = st.checkbox("Crop to the scoreboard and zoom the round strip (recommended)",
+                              value=db.get_setting(conn, "reader_crop", "1") != "0",
+                              help="Only applies to 16:9 screenshots; stretched or ultrawide shots are "
+                                   "always sent whole.")
+        st.caption("Billing is pay-as-you-go per read — no subscription, no monthly minimum. "
+                   "Test a model against your own screenshots with tests/check_reader.py.")
         if st.button("Save settings"):
-            db.set_setting(conn, "api_key", key.strip())
-            db.set_setting(conn, "model", model.strip() or reader.DEFAULT_MODEL)
-            st.success("Saved.")
+            if not from_secrets:
+                db.set_setting(conn, "api_key", key.strip())
+            db.set_setting(conn, "model", model)
+            db.set_setting(conn, "reader_crop", "1" if crop_on else "0")
+            toast("Reader settings saved", "🔍")
         st.markdown("---")
         st.markdown("**Player rating** — baselines and weights")
         rcfg = rating.load_config(conn)
@@ -332,6 +391,16 @@ def render_manage():
             operators.reset(conn)
             bump()
             st.rerun()
+        st.markdown("---")
+        st.markdown("**Time zone** — for match dates and save times (the server itself runs on UTC)")
+        tzs = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "UTC"]
+        cur_tz = db.get_setting(conn, "timezone", "America/New_York")
+        if cur_tz not in tzs:
+            tzs.insert(0, cur_tz)
+        tz_pick = st.selectbox("Time zone", tzs, index=tzs.index(cur_tz))
+        if st.button("Save time zone"):
+            db.set_setting(conn, "timezone", tz_pick)
+            toast(f"Time zone set to {tz_pick}", "🕘")
         st.markdown("---")
         st.markdown("**Side-swap rules** (used for attack/defense splits)")
         cs1, cs2 = st.columns(2)

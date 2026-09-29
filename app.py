@@ -112,6 +112,8 @@ def cloud_bootstrap():
                     n = db.restore_from_file(conn, tmp.name)
                     return f"Loaded the team database from GitHub ({n} series)."
         except Exception as e:
+            from ui.common import BOOT
+            BOOT["gh_load_failed"] = str(e)[:160]
             msg = f"Couldn't load the database from GitHub: {e}"
     if sheet and creds and os.path.exists(str(creds)):
         try:
@@ -123,7 +125,7 @@ def cloud_bootstrap():
     if db.our_team_id(conn) is None:
         try:
             import seed
-            seed.main(conn)
+            seed.main(conn, include_matches=False)
             return (msg + " " if msg else "") + "First run — roster and map pool created."
         except Exception as e:
             return (msg + " " if msg else "") + f"Could not seed the roster: {e}"

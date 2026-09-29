@@ -19,7 +19,16 @@ import os
 # Sonnet reads these scoreboards more reliably than Haiku and still costs about
 # two cents a screenshot. Pay-as-you-go per request - no subscription.
 # Switch models under Manage -> Settings.
-DEFAULT_MODEL = "claude-sonnet-5"
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+MODEL_CHOICES = ["claude-haiku-4-5-20251001", "claude-sonnet-5-5", "claude-opus-5-5"]
+# names stored by earlier versions of the app, mapped to current API model IDs
+LEGACY_MODELS = {"claude-haiku-4-5": "claude-haiku-4-5-20251001",
+                 "claude-sonnet-5": "claude-sonnet-5-5", "claude-opus-5": "claude-opus-5-5"}
+
+
+def resolve_model(name):
+    name = (name or "").strip()
+    return LEGACY_MODELS.get(name, name or DEFAULT_MODEL)
 
 # A full read is 10 player rows + up to ~15 round-strip entries + bans, which runs
 # well past a small cap. Too low and the JSON is silently truncated mid-array.
@@ -187,29 +196,80 @@ def _parse_json(text: str):
     return None
 
 
+# Fractions of a 16:9 frame, verified against live, replay and custom-banner
+# scoreboards. The scoreboard crop keeps team banners, the round strip, the full
+# stat table, the Match ID and the replay score banner; the strip crop is the
+# round-by-round row, sent separately at 2x so its small markers are legible.
+SCOREBOARD_BOX = (0.075, 0.07, 0.805, 0.765)
+STRIP_BOX = (0.36, 0.235, 0.80, 0.325)
+MAX_EDGE = 1568          # the API downsizes anything larger anyway
+MAX_BYTES = 3_500_000    # stay well under the API's per-image limit
+
+
+def _encode(img, quality=90):
+    import io
+    for q in (quality, 82, 72, 60):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=q, optimize=True)
+        if buf.tell() <= MAX_BYTES:
+            return buf.getvalue()
+    return buf.getvalue()
+
+
+def _fit(img):
+    w, h = img.size
+    scale = min(1.0, MAX_EDGE / max(w, h))
+    return img if scale >= 1.0 else img.resize((int(w * scale), int(h * scale)))
+
+
+def prepare_images(image_bytes, crop=True):
+    """Turn one screenshot into the images actually sent to the model.
+
+    Returns (images, mode). For a 16:9 screenshot: [scoreboard crop, 2x zoom of
+    the round strip]. For anything else (4:3 stretched, ultrawide) the layout
+    positions aren't reliable, so the whole frame is sent. Either way images are
+    resized and compressed, so a 4K PNG never trips the API's size limit.
+    """
+    from PIL import Image, ImageOps
+    import io
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
+    w, h = img.size
+    ratio = w / h if h else 0
+    if crop and 1.70 <= ratio <= 1.82:
+        b = SCOREBOARD_BOX
+        board = img.crop((int(b[0] * w), int(b[1] * h), int(b[2] * w), int(b[3] * h)))
+        s = STRIP_BOX
+        strip = img.crop((int(s[0] * w), int(s[1] * h), int(s[2] * w), int(s[3] * h)))
+        strip = strip.resize((strip.width * 2, strip.height * 2), Image.LANCZOS)
+        return [_encode(_fit(board)), _encode(_fit(strip))], "cropped"
+    return [_encode(_fit(img))], "full"
+
+
 def _media_type(filename):
     mt, _ = mimetypes.guess_type(filename or "")
     return mt if mt in ("image/png", "image/jpeg", "image/webp", "image/gif") else "image/jpeg"
 
 
-def _call(client, image_bytes, filename, model):
-    return client.messages.create(
-        model=model,
-        max_tokens=MAX_TOKENS,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image",
-                 "source": {"type": "base64", "media_type": _media_type(filename),
-                            "data": base64.b64encode(image_bytes).decode()}},
-                {"type": "text", "text": PROMPT},
-            ],
-        }],
-    )
+ZOOM_NOTE = """You are given TWO images of the same screenshot:
+  IMAGE 1 - the scoreboard: team banners and scores, map, Match ID, and the player table.
+  IMAGE 2 - the round strip only, enlarged 2x. Read EVERY round, winner color, icon and the
+            ATK/DEF labels from IMAGE 2. Use IMAGE 1 for everything else.
+
+"""
+
+
+def _call(client, image_bytes, filename, model, crop=True):
+    images, mode = prepare_images(image_bytes, crop=crop)
+    content = [{"type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg",
+                           "data": base64.b64encode(b).decode()}} for b in images]
+    content.append({"type": "text", "text": (ZOOM_NOTE if mode == "cropped" else "") + PROMPT})
+    return client.messages.create(model=model, max_tokens=MAX_TOKENS,
+                                  messages=[{"role": "user", "content": content}])
 
 
 def read_screenshot(image_bytes: bytes, filename: str = "", api_key: str = None,
-                    model: str = None) -> dict:
+                    model: str = None, crop: bool = True) -> dict:
     """Send one screenshot to the vision model, return the parsed extraction dict."""
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -221,7 +281,10 @@ def read_screenshot(image_bytes: bytes, filename: str = "", api_key: str = None,
 
     client = anthropic.Anthropic(api_key=api_key, max_retries=2)
     try:
-        msg = _call(client, image_bytes, filename, model or DEFAULT_MODEL)
+        msg = _call(client, image_bytes, filename, resolve_model(model), crop=crop)
+    except anthropic.NotFoundError as e:
+        raise ReaderError(f"The model '{resolve_model(model)}' isn't available to this API key — "
+                          "pick another under Manage → Settings.") from e
     except anthropic.AuthenticationError as e:
         raise ReaderError("The API key was rejected — check it under Manage → Settings.") from e
     except anthropic.RateLimitError as e:

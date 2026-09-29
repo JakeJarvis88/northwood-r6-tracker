@@ -222,7 +222,16 @@ def map_editor(m, opp_id, opp_name):
                            "Player": st.column_config.TextColumn(disabled=True),
                            "1vX": st.column_config.SelectboxColumn(options=list(range(0, 15))),
                            "Plants": st.column_config.SelectboxColumn(options=list(range(0, 15)))})
-        if st.button("💾 Save 1vX & plants", key=f"{k}_save4"):
+        z1, z2 = st.columns(2)
+        if z2.button("0️⃣ Set blanks to 0", key=f"{k}_zero",
+                     help="Fills every empty 1vX/plants cell on this map with 0. Existing numbers stay."):
+            n = rating.fill_blanks_with_zero(conn, mg)
+            reset_widgets(f"{k}_man")
+            bump()
+            toast(f"Filled {n} blank row(s) with 0", "0️⃣")
+            try_autosync()
+            st.rerun()
+        if z1.button("💾 Save 1vX & plants", key=f"{k}_save4"):
             rating.save_manual(conn, mg, [
                 {"player_id": int(r["player_id"]), "clutches": to_int(r["1vX"]), "plants": to_int(r["Plants"])}
                 for _, r in med.iterrows()])

@@ -508,3 +508,53 @@ def apply_sides(rows, starting_side, ot_starting_side=None, rounds_per_half=6):
     for r in rows:
         r["side"] = side_for_round(r["round_number"], starting_side, ot_starting_side, rounds_per_half)
     return rows
+
+
+# ============================================================ round analytics
+def round_frame(conn, map_game_ids=None, rounds_per_half=6) -> pd.DataFrame:
+    """Every stored round with its position inside the half, map and opponent."""
+    df = pd.read_sql_query(
+        """SELECT rr.map_game_id, rr.round_number, rr.won, rr.side, rr.win_condition,
+                  mp.map_name, mp.map_number, s.date, s.series_id, t.name AS opponent
+           FROM round_results rr JOIN maps_played mp USING(map_game_id)
+           JOIN series s USING(series_id) LEFT JOIN teams t ON s.opponent_id=t.team_id
+           WHERE rr.won IS NOT NULL""", conn)
+    if df.empty:
+        return df
+    if map_game_ids is not None:
+        df = df[df["map_game_id"].isin(list(map_game_ids))]
+    reg = rounds_per_half * 2
+    df["phase"] = df["round_number"].apply(
+        lambda n: "H1" if n <= rounds_per_half else ("H2" if n <= reg else "OT"))
+    df["pos"] = df["round_number"].apply(
+        lambda n: n if n <= rounds_per_half else (n - rounds_per_half if n <= reg else n - reg))
+    return df
+
+
+def phase_splits(conn, map_game_ids=None, rounds_per_half=6) -> pd.DataFrame:
+    """Round win % in the moments that decide halves.
+
+    - Opening round of each half (rounds 1 and 7): sets the tone of the half.
+    - Rounds 1-3 vs 4-6 of each half: the league bans one more operator after
+      round 3, so this is the before/after of the final ban.
+    - Overtime.
+    """
+    df = round_frame(conn, map_game_ids, rounds_per_half)
+    if df.empty:
+        return pd.DataFrame()
+    reg = df[df["phase"] != "OT"]
+    buckets = [
+        ("Opening round of a half", reg[reg["pos"] == 1]),
+        ("Rounds 1-3 (before final ban)", reg[reg["pos"] <= 3]),
+        ("Rounds 4-6 (after final ban)", reg[reg["pos"] >= 4]),
+        ("Overtime", df[df["phase"] == "OT"]),
+    ]
+    rows = []
+    for label, sub in buckets:
+        for side in ("ATK", "DEF", "All"):
+            s = sub if side == "All" else sub[sub["side"] == side]
+            if s.empty:
+                continue
+            rows.append({"Moment": label, "Side": side, "Rounds": len(s), "Won": int(s["won"].sum()),
+                         "Win %": round(100 * s["won"].mean(), 1)})
+    return pd.DataFrame(rows)

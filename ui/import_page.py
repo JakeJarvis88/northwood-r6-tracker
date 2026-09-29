@@ -9,7 +9,8 @@ import streamlit as st
 from siegestats import db, matching, reader, dedupe, gsheets, insights, sides, rating, opbans, operators
 from ui.common import (conn, our_id, UNASSIGNED, MATCH_TYPES, series_label, list_series,
                        roster_names, player_id_by_name, map_options, to_int, toast, try_autosync, bump,
-                       last_action_line, reset_widgets, persistence_banner, persistence_state)
+                       last_action_line, reset_widgets, persistence_banner, persistence_state,
+                       now_local, shot_time)
 
 def edit_series_form(series):
     """Edit an existing series: opponent, competition, date, format, match type, etc."""
@@ -72,6 +73,12 @@ def edit_series_form(series):
 def render_import():
     st.title("📥 Import Match")
     persistence_banner()
+    recs = st.session_state.pop("new_records", None)
+    if recs:
+        st.balloons()
+        for r in recs:
+            st.success(r)
+            toast(r, "🎉")
     last_action_line()
 
     # ---- 1. series ----------------------------------------------------------
@@ -83,7 +90,7 @@ def render_import():
         with st.form("new_series"):
             c1, c2, c3 = st.columns(3)
             opp_name = c1.text_input("Opponent team")
-            sdate = c2.date_input("Date", value=date.today())
+            sdate = c2.date_input("Date", value=now_local().date())
             fmt = c3.selectbox("Format", ["BO1", "BO3", "Other"])
             c4, c5, c6 = st.columns(3)
             mtype = c4.selectbox("Match type", MATCH_TYPES,
@@ -124,7 +131,7 @@ def render_import():
     # ---- 2. screenshots ------------------------------------------------------
     st.subheader("2 · Screenshots")
     api_key = db.get_setting(conn, "api_key") or os.environ.get("ANTHROPIC_API_KEY")
-    model = db.get_setting(conn, "model", reader.DEFAULT_MODEL)
+    model = reader.resolve_model(db.get_setting(conn, "model", reader.DEFAULT_MODEL))
     if not api_key:
         st.info("No Anthropic API key configured (Manage → Settings), so automatic reading is off. "
                 "You can still add maps manually below.")
@@ -143,8 +150,11 @@ def render_import():
             for i, f in enumerate(pending_files, 1):
                 st.write(f"{i}/{len(pending_files)} · {f.name}")
                 try:
-                    ex = reader.read_screenshot(f.getvalue(), f.name, api_key=api_key, model=model)
+                    ex = reader.read_screenshot(f.getvalue(), f.name, api_key=api_key, model=model,
+                                                crop=db.get_setting(conn, "reader_crop", "1") != "0")
                     ex["_file"] = f.name
+                    t = shot_time(f.name)
+                    ex["_shot_time"] = t.isoformat() if t is not None else None
                     st.session_state["extractions"][_cid(f)] = ex
                     n_players = sum(len(t.get("players", [])) for t in ex.get("teams", []))
                     n_rounds = len((ex.get("round_strip") or {}).get("rounds") or [])
@@ -170,7 +180,13 @@ def render_import():
         st.rerun()
 
     # ---- 3. review & confirm -------------------------------------------------
-    for fname, ex in list(st.session_state["extractions"].items()):
+    pending_cards = [(k, e) for k, e in st.session_state["extractions"].items() if not e.get("_imported")]
+    pending_cards.sort(key=lambda kv: kv[1].get("_shot_time") or "9999")
+    base_no = _next_map_no(sid)
+    for i, (k, e) in enumerate(pending_cards):
+        e["_default_map_no"] = min(base_no + i, 5)
+    for fname, ex in sorted(st.session_state["extractions"].items(),
+                            key=lambda kv: kv[1].get("_shot_time") or "9999"):
         label = ex.get("_file", fname)
         if ex.get("_imported"):
             mg = ex["_imported"]
@@ -247,6 +263,10 @@ def finalize_section(sid, series):
         st.success(msg)
         toast("Match finalized", "🏁")
         st.balloons()
+        st.session_state[f"recap_{sid}"] = True
+    if st.session_state.get(f"recap_{sid}") or (already and maps):
+        with st.expander("📣 Match recap — copy for Discord", expanded=bool(st.session_state.get(f"recap_{sid}"))):
+            st.code(insights.match_recap(conn, sid), language=None)
 
 
 @st.fragment
@@ -264,7 +284,8 @@ def review_one(fname, ex, sid, opp_id, opp_name):
     if map_name == "(other…)":
         map_name = c1.text_input("Map name", key=f"mapother_{fname}")
     match_id = c2.text_input("Siege Match ID", value=ex.get("match_id") or "", key=f"mid_{fname}")
-    map_no = c3.number_input("Map #", 1, 5, value=_next_map_no(sid), key=f"no_{fname}")
+    map_no = c3.number_input("Map #", 1, 5, value=int(ex.get("_default_map_no") or _next_map_no(sid)),
+                             key=f"no_{fname}")
     status = c4.selectbox("Status", ["confirmed", "in_progress"],
                           index=1 if not ex.get("is_replay") and _looks_unfinished(teams) else 0,
                           key=f"st_{fname}",
@@ -280,6 +301,27 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         st.warning("Couldn't identify Northwood from gamertags - pick the correct block above.")
 
     ours, theirs = teams[our_side], teams[1 - our_side]
+
+    # ---- wrong-series guards: the screenshot's date and opponent vs this series
+    srow = conn.execute("SELECT date FROM series WHERE series_id=?", (sid,)).fetchone()
+    if ex.get("_shot_time") and srow:
+        shot_day = str(ex["_shot_time"])[:10]
+        if shot_day != str(srow["date"])[:10]:
+            st.warning(f"This screenshot was taken **{shot_day}**, but the series is dated "
+                       f"**{srow['date']}**. Wrong series selected, or the series date needs fixing?",
+                       icon="📅")
+    their_label = (theirs.get("label") or "").strip()
+    generic = {"", "blue team", "orange team", "your team", "enemy team", "team 1", "team 2",
+               "opponent", "northwood"}
+    if their_label.lower() not in generic and opp_name:
+        known = [opp_name] + [r["alt_name"] for r in conn.execute(
+            "SELECT alt_name FROM team_aliases WHERE team_id=?", (opp_id,)).fetchall()]
+        best = max(matching.similarity(their_label, k) for k in known)
+        if best < 0.6:
+            st.warning(f"The scoreboard names the opponent **{their_label}**, but this series is "
+                       f"against **{opp_name}**. Check you picked the right series before confirming.",
+                       icon="🧭")
+
     cA, cB = st.columns(2)
     rw = cA.number_input("Rounds won (Northwood)", 0, 30, int(ours.get("score") or 0), key=f"rw_{fname}")
     rl = cB.number_input("Rounds lost", 0, 30, int(theirs.get("score") or 0), key=f"rl_{fname}")
@@ -442,13 +484,14 @@ def review_one(fname, ex, sid, opp_id, opp_name):
 
     # manual stats the scoreboard cannot provide ----------------------------
     with st.expander("✋ 1vX clutches and plants (manual — not on the scoreboard)"):
-        st.caption("Northwood only. Leave blank if you didn't track them for this map; "
-                   "blank is treated as 'not recorded', not as zero. These feed the player rating.")
+        st.caption("Northwood only. Everyone starts at 0 — just change who clutched or planted. "
+                   "If you didn't track this map at all, clear the cells: blank means 'not tracked' "
+                   "and leaves the map out of the rating instead of counting it as zero.")
         # Rows are keyed by gamertag (stable) so the table doesn't remount every
         # time an assignment above changes; the player is resolved when saving.
         our_tags = [p.get("gamertag", "") for p in ours.get("players", []) if p.get("gamertag")]
-        man_seed = pd.DataFrame({"Player": our_tags, "1vX": [None] * len(our_tags),
-                                 "Plants": [None] * len(our_tags)})
+        man_seed = pd.DataFrame({"Player": our_tags, "1vX": [0] * len(our_tags),
+                                 "Plants": [0] * len(our_tags)})
         man_edit = st.data_editor(
             man_seed, key=f"man_{fname}", width="stretch", hide_index=True,
             column_config={"Player": st.column_config.TextColumn("Gamertag", disabled=True),
@@ -548,6 +591,9 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         conn.execute("UPDATE series SET finalized=0 WHERE series_id=?", (sid,))
         conn.commit()
         ex["_imported"] = mg_id
+        recs = insights.new_records(conn, mg_id)
+        if recs:
+            st.session_state["new_records"] = recs
         reset_widgets(suffix=f"_{fname}")   # drop the card's editor state so it can't leak
         toast(f"{map_name} {rw}-{rl} saved as map #{mg_id}" + (" (updated)" if action == "update" else ""),
               "🏆" if result == "W" else "💾")

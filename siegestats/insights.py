@@ -309,3 +309,67 @@ def league_kill_records(ours: pd.DataFrame) -> pd.DataFrame:
                             "Kills": int(best), "Player": r["display_name"], "Date": r["date"],
                             "Opponent": r["opponent"], "Detail": r["map_name"]})
     return pd.DataFrame(out).sort_values(["League", "Date"])
+
+
+def new_records(conn, map_game_id) -> list:
+    """Personal bests and league records set by one just-saved map.
+    A player needs earlier games on record before a best counts."""
+    df = stats.load_frame(conn)
+    if df.empty:
+        return []
+    ours = df[(df["is_us"] == 1) & df["kills"].notna()]
+    this = ours[ours["map_game_id"] == map_game_id]
+    if this.empty:
+        return []
+    sid = int(this["series_id"].iloc[0])
+    msgs = []
+    for _, r in this.iterrows():
+        name, k = r["display_name"], int(r["kills"])
+        before = ours[(ours["display_name"] == name) & (ours["map_game_id"] != map_game_id)]
+        if len(before) >= 3 and k > before["kills"].max():   # early-season maps don't count
+            msgs.append(f"🎯 {name}: new personal best — {k} kills in a map (was {int(before['kills'].max())})")
+        if r["format"] == "BO3":
+            series_k = int(ours[(ours["display_name"] == name) & (ours["series_id"] == sid)]["kills"].sum())
+            prev = (ours[(ours["display_name"] == name) & (ours["series_id"] != sid)]
+                    .groupby("series_id")["kills"].sum())
+            if len(prev) >= 2 and series_k > prev.max():
+                msgs.append(f"🔥 {name}: new series best — {series_k} kills (was {int(prev.max())})")
+    league = this["competition"].iloc[0]
+    if league:
+        before = ours[(ours["competition"] == league) & (ours["series_id"] != sid)]
+        now = ours[ours["competition"] == league]
+        if not before.empty:
+            old_rec = league_kill_records(before)
+            new_rec = league_kill_records(now)
+            if not old_rec.empty and not new_rec.empty and new_rec["Kills"].max() > old_rec["Kills"].max():
+                top = new_rec.iloc[0]
+                msgs.append(f"🏆 {top['Player']} set the {league} record: {int(top['Kills'])} "
+                            f"({top['Record'].lower()})")
+    return msgs
+
+
+def match_recap(conn, series_id) -> str:
+    """A Discord-ready recap of one series."""
+    s = conn.execute("""SELECT s.*, t.name AS opponent FROM series s
+                        LEFT JOIN teams t ON s.opponent_id=t.team_id WHERE series_id=?""",
+                     (series_id,)).fetchone()
+    if not s:
+        return ""
+    df = stats.load_frame(conn)
+    ours = df[(df["is_us"] == 1) & (df["series_id"] == series_id)]
+    maps = ours.drop_duplicates("map_game_id").sort_values("map_number")
+    res = {"W": "WIN", "L": "LOSS", "T": "DRAW"}.get(s["result"], "—")
+    lines = [f"**Northwood {s['maps_won']}-{s['maps_lost']} {s['opponent']}** — {res}",
+             f"{s['format']} · {s['competition'] or 'no league'} · {s['date']}"
+             + (" · scrim" if (s["match_type"] or "") == "Scrim" else "")]
+    for _, m in maps.iterrows():
+        mrows = ours[ours["map_game_id"] == m["map_game_id"]].sort_values("kills", ascending=False)
+        top = mrows.iloc[0] if not mrows.empty else None
+        lines.append(f"• {m['map_name']} {int(m['rounds_won'])}-{int(m['rounds_lost'])}"
+                     + (f" — top frag {top['display_name']} {int(top['kills'])}/{int(top['deaths'])}"
+                        if top is not None else ""))
+    if not ours.empty:
+        tot = ours.groupby("display_name")[["kills", "deaths"]].sum().sort_values("kills", ascending=False)
+        lines.append("Series K/D: " + ", ".join(f"{n} {int(r.kills)}/{int(r.deaths)}"
+                                                 for n, r in tot.iterrows()))
+    return "\n".join(lines)

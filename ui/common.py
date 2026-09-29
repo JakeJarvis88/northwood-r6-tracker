@@ -7,6 +7,8 @@ write so the next render reloads; nothing is ever served stale, and nothing is
 re-queried when the data hasn't moved.
 """
 
+import os
+
 import pandas as pd
 import streamlit as st
 
@@ -220,7 +222,9 @@ def reset_widgets(*keys, prefix=None, suffix=None):
 
 
 SECRET_ALIASES = {"github_token": ("github_token", "GITHUB_TOKEN", "gh_token"),
-                  "github_repo": ("github_repo", "GITHUB_REPO", "gh_repo")}
+                  "github_repo": ("github_repo", "GITHUB_REPO", "gh_repo"),
+                  "ANTHROPIC_API_KEY": ("ANTHROPIC_API_KEY", "anthropic_api_key", "anthropic_key",
+                                        "CLAUDE_API_KEY", "api_key")}
 
 
 def _secret(key, default=None):
@@ -318,3 +322,19 @@ def selected_rows(event):
         return list(event.selection.rows)
     except Exception:
         return []
+
+
+def resolve_api_key():
+    """(key, source). Secrets win, then the environment, then a key typed into
+    Settings — a stale key saved in the database must never shadow the Secret."""
+    from siegestats import reader
+    k = reader.clean_key(_secret("ANTHROPIC_API_KEY"))
+    if k:
+        return k, "Secrets"
+    k = reader.clean_key(os.environ.get("ANTHROPIC_API_KEY"))
+    if k:
+        return k, "environment"
+    k = reader.clean_key(db.get_setting(conn, "api_key"))
+    if k:
+        return k, "Settings (stored in this session)"
+    return "", None

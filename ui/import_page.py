@@ -1,6 +1,5 @@
 """Import Match page: series, screenshots, review cards, veto, finalize."""
 import hashlib
-import os
 from datetime import date
 
 import pandas as pd
@@ -10,7 +9,7 @@ from siegestats import db, matching, reader, dedupe, gsheets, insights, sides, r
 from ui.common import (conn, our_id, UNASSIGNED, MATCH_TYPES, series_label, list_series,
                        roster_names, player_id_by_name, map_options, to_int, toast, try_autosync, bump,
                        last_action_line, reset_widgets, persistence_banner, persistence_state,
-                       now_local, shot_time)
+                       now_local, shot_time, resolve_api_key)
 
 def edit_series_form(series):
     """Edit an existing series: opponent, competition, date, format, match type, etc."""
@@ -130,7 +129,7 @@ def render_import():
 
     # ---- 2. screenshots ------------------------------------------------------
     st.subheader("2 · Screenshots")
-    api_key = db.get_setting(conn, "api_key") or os.environ.get("ANTHROPIC_API_KEY")
+    api_key, key_source = resolve_api_key()
     model = reader.resolve_model(db.get_setting(conn, "model", reader.DEFAULT_MODEL))
     if not api_key:
         st.info("No Anthropic API key configured (Manage → Settings), so automatic reading is off. "

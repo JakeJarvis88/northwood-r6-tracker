@@ -7,7 +7,7 @@ import streamlit as st
 from siegestats import db, ghstore, reader, stats, export_excel, sides, rating, store, operators
 from ui.common import (conn, our_id, series_label, list_series, persistence_banner,
                        roster_names, player_id_by_name, toast, try_autosync, full_sync, bump,
-                       github_config, push_to_github, BOOT)
+                       github_config, push_to_github, BOOT, resolve_api_key)
 
 def render_manage():
     st.title("⚙️ Manage")
@@ -306,18 +306,28 @@ def render_manage():
 
     with t[4]:
         st.markdown("**Screenshot reader** (Anthropic API)")
-        import os as _os
-        from_secrets = bool(_os.environ.get("ANTHROPIC_API_KEY"))
+        eff_key, key_src = resolve_api_key()
+        from_secrets = key_src in ("Secrets", "environment")
+        if eff_key:
+            st.info(f"Using the key from **{key_src}**: `{reader.mask(eff_key)}`", icon="🔑")
+            for problem in reader.key_problems(eff_key):
+                st.warning(f"This key looks wrong: {problem}.", icon="⚠️")
+        else:
+            st.warning("No API key found. Add `ANTHROPIC_API_KEY = \"sk-ant-...\"` to the app's Secrets "
+                       "**above any [section] header**, save, and reboot the app.", icon="🔑")
+        if from_secrets and db.get_setting(conn, "api_key", ""):
+            st.caption("A key is also saved in the database; the Secret takes priority over it.")
+            if st.button("Clear the stored key"):
+                db.set_setting(conn, "api_key", "")
+                toast("Stored key cleared", "🧹")
+                st.rerun()
+        if eff_key and st.button("🔌 Test the key", type="primary"):
+            with st.spinner("Asking Anthropic…"):
+                ok_k, why_k = reader.test_key(eff_key, db.get_setting(conn, "model", reader.DEFAULT_MODEL))
+            (st.success if ok_k else st.error)(why_k)
+            toast("API key works" if ok_k else "API key test failed", "✅" if ok_k else "🚨")
         if from_secrets:
-            st.success("Using the API key from the app's Secrets — the safest place for it.", icon="🔑")
-            key = db.get_setting(conn, "api_key", "")
-            if key:
-                st.warning("An older key is also saved in the database. It's never uploaded to GitHub, "
-                           "but you can clear it.", icon="🧹")
-                if st.button("Clear the stored key"):
-                    db.set_setting(conn, "api_key", "")
-                    toast("Stored key cleared", "🧹")
-                    st.rerun()
+            key = ""
         else:
             key = st.text_input("API key", value=db.get_setting(conn, "api_key", ""), type="password",
                                 help="On the hosted app, put ANTHROPIC_API_KEY in Secrets instead. A key "

@@ -152,6 +152,70 @@ class ReaderError(Exception):
     pass
 
 
+def clean_key(raw):
+    """Undo the ways a pasted key gets mangled: surrounding whitespace or
+    newlines, straight or curly quotes, a stray 'Bearer ' prefix."""
+    k = str(raw or "").strip()
+    for q in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019"):
+        k = k.strip(q)
+    if k.lower().startswith("bearer "):
+        k = k[7:]
+    return "".join(k.split())
+
+
+def key_problems(key):
+    """Obvious format problems, checked before spending an API call."""
+    issues = []
+    if not key:
+        return ["no key found"]
+    if not key.startswith("sk-ant-"):
+        issues.append("it doesn't start with 'sk-ant-' — make sure you copied an Anthropic API key, "
+                      "not a workspace or console ID")
+    if len(key) < 60:
+        issues.append(f"it's only {len(key)} characters — it was probably cut off when copied")
+    return issues
+
+
+def mask(key):
+    return f"{key[:14]}…{key[-4:]} ({len(key)} chars)" if key and len(key) > 20 else "(none)"
+
+
+def test_key(api_key, model=None):
+    """Make the smallest possible real call. Returns (ok, message)."""
+    try:
+        import anthropic
+    except ImportError:
+        return False, "The 'anthropic' package isn't installed — check requirements.txt deployed."
+    model = resolve_model(model)
+    try:
+        client = anthropic.Anthropic(api_key=api_key, max_retries=1)
+        client.messages.create(model=model, max_tokens=5,
+                               messages=[{"role": "user", "content": "Reply with OK."}])
+        return True, f"The key works with {model}. Screenshot reading is ready."
+    except anthropic.AuthenticationError:
+        return False, ("Anthropic rejected this key (401). It was likely copied incompletely, "
+                       "deleted in the console, or belongs to a different organization. Create a "
+                       "fresh key at console.anthropic.com and paste it again.")
+    except anthropic.PermissionDeniedError:
+        return False, ("The key is valid but not allowed to make this request (403). Check the key's "
+                       "workspace permissions in the console.")
+    except anthropic.NotFoundError:
+        return False, f"The key works, but the model '{model}' isn't available to it. Pick another model."
+    except anthropic.BadRequestError as e:
+        text = str(getattr(e, "message", e))
+        if "credit" in text.lower() or "balance" in text.lower() or "billing" in text.lower():
+            return False, ("The key is fine, but the account has no credit. Add credit under "
+                           "Billing in the Anthropic console (pay-as-you-go, no subscription), "
+                           "and leave auto-reload off.")
+        return False, f"The API refused the request: {text[:200]}"
+    except anthropic.RateLimitError:
+        return False, "The key works but is rate-limited right now — wait a minute and test again."
+    except anthropic.APIConnectionError as e:
+        return False, f"Couldn't reach Anthropic from the server: {e}"
+    except Exception as e:
+        return False, f"Unexpected error: {type(e).__name__}: {str(e)[:200]}"
+
+
 def _parse_json(text: str):
     """Parse the model's reply, repairing a truncated tail if needed.
 
@@ -271,7 +335,7 @@ def _call(client, image_bytes, filename, model, crop=True):
 def read_screenshot(image_bytes: bytes, filename: str = "", api_key: str = None,
                     model: str = None, crop: bool = True) -> dict:
     """Send one screenshot to the vision model, return the parsed extraction dict."""
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = clean_key(api_key or os.environ.get("ANTHROPIC_API_KEY"))
     if not api_key:
         raise ReaderError("No Anthropic API key configured (Manage -> Settings).")
     try:

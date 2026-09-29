@@ -7,7 +7,7 @@ import streamlit as st
 
 from siegestats import insights, opbans, rating, sides, stats
 from ui import charts
-from ui.common import (conn, frame, vetoes, bans, setting_int, selected_rows)
+from ui.common import (conn, frame, vetoes, bans, setting_int, selected_rows, persistence_banner)
 
 TABS = ["🏠 Team", "👥 Players", "🔎 Player Detail", "🕵️ Opponents", "🗺️ Maps", "🚫 Op Bans"]
 SCOPES = {"Gameday only": ["Gameday"], "Scrims only": ["Scrim"], "Both (total)": None}
@@ -60,6 +60,7 @@ def _filters(df):
 
 def render_dashboards():
     st.title("📊 Dashboards")
+    persistence_banner()
     df = frame()
     if df.empty:
         st.info("No data yet — import a match first.")
@@ -108,6 +109,17 @@ def team_tab(ours):
 
     ids = ours["map_game_id"].unique().tolist()
     rph, orph = _side_config()
+
+    lr = insights.league_kill_records(ours)
+    if not lr.empty:
+        st.markdown("### 🏆 Kill records by league")
+        ev = st.dataframe(lr, width="stretch", hide_index=True,
+                          on_select="rerun", selection_mode="single-row", key="team_records")
+        rows = selected_rows(ev)
+        if rows:
+            _jump("sel_player", lr.iloc[rows[0]]["Player"], "🔎 Player Detail")
+        st.caption("BO3 leagues count kills across a whole series; BO1 leagues count a single map. "
+                   "Follows the sidebar filters — gameday only by default. Ties show every holder.")
 
     st.markdown("### Attack vs defense")
     sr = sides.side_record_from_rounds(conn, ids)
@@ -204,6 +216,16 @@ def players_tab(ours):
         if (rt["Components"] != "5/5").any():
             cB.caption("Components < 5/5 = plants or 1vX not recorded for those maps; missing parts are "
                        "dropped and the rest reweighted, not scored as zero.")
+
+    pb = insights.personal_bests(ours)
+    if not pb.empty:
+        st.markdown("### 🎯 Personal bests")
+        ev = st.dataframe(pb, width="stretch", hide_index=True,
+                          on_select="rerun", selection_mode="single-row", key="players_bests")
+        rows = selected_rows(ev)
+        if rows:
+            _jump("sel_player", pb.iloc[rows[0]]["Player"], "🔎 Player Detail")
+        st.caption("Most kills in one map, and most kills across one series (a BO3 adds its maps together).")
 
     st.markdown("### Stats")
     cA, cB = st.columns([3, 2])

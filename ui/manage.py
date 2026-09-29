@@ -5,12 +5,13 @@ import pandas as pd
 import streamlit as st
 
 from siegestats import db, ghstore, reader, stats, export_excel, sides, rating, store, operators
-from ui.common import (conn, our_id, series_label, list_series,
+from ui.common import (conn, our_id, series_label, list_series, persistence_banner,
                        roster_names, player_id_by_name, toast, try_autosync, full_sync, bump,
                        github_config, push_to_github)
 
 def render_manage():
     st.title("⚙️ Manage")
+    persistence_banner()
     t = st.tabs(["Roster & Aliases", "Map Pool", "Teams", "Data", "Settings"])
 
     with t[0]:
@@ -116,11 +117,16 @@ def render_manage():
             if gc2.button("⬇️ Load database from GitHub", disabled=not (ok and exists),
                           help="Replaces this session's data with the stored copy."):
                 try:
-                    n = ghstore.pull(gh_token, gh_repo, db.DB_PATH)
-                    st.cache_resource.clear()
+                    import tempfile as _tf
+                    blob = ghstore.pull_bytes(gh_token, gh_repo)
+                    if not blob:
+                        raise RuntimeError("nothing stored in the repo yet")
+                    with _tf.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                        tmp.write(blob)
+                    n = db.restore_from_file(conn, tmp.name)
                     st.cache_data.clear()
                     bump()
-                    toast(f"Loaded {n // 1024} KB from GitHub", "⬇️")
+                    toast(f"Loaded {n} series from GitHub", "⬇️")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Load failed: {e}")
@@ -215,13 +221,11 @@ def render_manage():
                 "sidebar, one tab per map.", icon="👉")
         st.markdown("---")
         st.markdown("**Backup**")
-        st.caption("The whole tracker lives in one file. Download it before a big change; "
-                   "restoring is just dropping it back into data/.")
-        dbp = db.DB_PATH
+        st.caption("The whole tracker in one file. Download it before a big change; restore it "
+                   "with the uploader below.")
         cbk1, cbk2 = st.columns(2)
-        with open(dbp, "rb") as f:
-            cbk1.download_button("💾 Download siege.db backup", f.read(),
-                                 f"siege_backup_{pd.Timestamp.now():%Y%m%d}.db")
+        cbk1.download_button("💾 Download siege.db backup", db.snapshot_bytes(conn),
+                             f"siege_backup_{pd.Timestamp.now():%Y%m%d_%H%M}.db")
         raw = stats.load_frame(conn)
         if not raw.empty:
             cbk2.download_button("📄 Download all rows (CSV)", raw.to_csv(index=False).encode(),
@@ -232,20 +236,16 @@ def render_manage():
                    "deployment, or rolling back. Replaces everything currently stored.")
         up = st.file_uploader("siege.db", type=["db"], key="dbrestore")
         if up is not None and st.button("⬆️ Restore from this file", type="secondary"):
-            import shutil, sqlite3, tempfile
+            import tempfile
             try:
                 with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
                     tmp.write(up.getvalue())
                     tmp_path = tmp.name
-                probe = sqlite3.connect(tmp_path)
-                n = probe.execute("SELECT COUNT(*) FROM series").fetchone()[0]
-                probe.close()
-                conn.commit()
-                shutil.copyfile(tmp_path, db.DB_PATH)
-                st.cache_resource.clear()
+                n = db.restore_from_file(conn, tmp_path)
                 st.cache_data.clear()
                 bump()
-                st.success(f"Restored {n} series. Reloading…")
+                toast(f"Restored {n} series from the file", "⬆️")
+                try_autosync()          # immediately protect what was just restored
                 st.rerun()
             except Exception as e:
                 st.error(f"That file isn't a valid tracker database: {e}")

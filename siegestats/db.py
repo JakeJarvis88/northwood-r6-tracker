@@ -210,19 +210,8 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
-def get_conn(path: str = None) -> sqlite3.Connection:
-    path = path or DB_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    # timeout: wait for a lock instead of failing instantly; Streamlit serves
-    # sessions from threads that share this one connection.
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    try:
-        conn.execute("PRAGMA journal_mode = WAL")   # readers never block the writer
-    except sqlite3.OperationalError:
-        pass                                          # some mounted filesystems refuse WAL
-    conn.executescript(SCHEMA)
+def migrate(conn):
+    """Add columns introduced after a database was first created."""
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(series)")]
     if "finalized" not in cols:
         conn.execute("ALTER TABLE series ADD COLUMN finalized INTEGER DEFAULT 0")
@@ -245,6 +234,22 @@ def get_conn(path: str = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE series ADD COLUMN match_type TEXT DEFAULT 'Gameday'")
         conn.execute("UPDATE series SET match_type='Gameday' WHERE match_type IS NULL")
         conn.commit()
+
+
+def get_conn(path: str = None) -> sqlite3.Connection:
+    path = path or DB_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # timeout: wait for a lock instead of failing instantly; Streamlit serves
+    # sessions from threads that share this one connection.
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")   # readers never block the writer
+    except sqlite3.OperationalError:
+        pass                                          # some mounted filesystems refuse WAL
+    conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
 
 
@@ -440,3 +445,89 @@ def save_round_results(conn, map_game_id, rounds, source="screenshot"):
 def has_rounds(conn, map_game_id):
     return conn.execute("SELECT COUNT(*) c FROM round_results WHERE map_game_id=?",
                         (map_game_id,)).fetchone()["c"] > 0
+
+
+def rename_or_merge_team(conn, team_id, new_name):
+    """Rename a team, or merge it into an existing team of that name.
+
+    Fixing a typo shouldn't leave the misspelling behind, and two spellings of
+    one opponent shouldn't split its history. If `new_name` already belongs to
+    another team, every reference is repointed to that team and the old record is
+    removed (a merge); otherwise the team is simply renamed in place.
+    Returns (surviving_team_id, "renamed"|"merged").
+    """
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise ValueError("A team name is required.")
+    row = conn.execute("SELECT team_id, name, is_us FROM teams WHERE team_id=?", (team_id,)).fetchone()
+    if not row:
+        raise ValueError("That team no longer exists.")
+    target = conn.execute("SELECT team_id FROM teams WHERE lower(name)=lower(?) AND team_id<>?",
+                          (new_name, team_id)).fetchone()
+    try:
+        if target:
+            keep = target["team_id"]
+            for table, col in (("series", "opponent_id"), ("player_map_stats", "team_id"),
+                               ("operator_bans", "team_id"), ("veto_events", "team_id"),
+                               ("players", "team_id"), ("team_aliases", "team_id")):
+                conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (keep, team_id))
+            # keep the old spelling as an alias so future imports still match it
+            conn.execute("INSERT INTO team_aliases(team_id, alt_name) SELECT ?, ? "
+                         "WHERE NOT EXISTS (SELECT 1 FROM team_aliases WHERE team_id=? AND alt_name=?)",
+                         (keep, row["name"], keep, row["name"]))
+            conn.execute("DELETE FROM teams WHERE team_id=?", (team_id,))
+            conn.commit()
+            return keep, "merged"
+        conn.execute("UPDATE teams SET name=? WHERE team_id=?", (new_name, team_id))
+        conn.commit()
+        return team_id, "renamed"
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# --------------------------------------------------------------- snapshots
+def snapshot_bytes(conn) -> bytes:
+    """A complete, consistent copy of the live database as bytes.
+
+    Never read the database file directly: in WAL mode recent writes live in a
+    side file until checkpointed, so the raw file can be missing your latest
+    imports. The SQLite backup API copies the logical database - WAL included -
+    without blocking other readers.
+    """
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        dst = sqlite3.connect(tmp)
+        conn.commit()
+        conn.backup(dst)
+        dst.execute("PRAGMA journal_mode = DELETE")  # single self-contained file
+        dst.close()
+        with open(tmp, "rb") as f:
+            return f.read()
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.remove(tmp + ext)
+            except OSError:
+                pass
+
+
+def restore_from_file(conn, path):
+    """Replace the live database's contents with the database at `path`,
+    in place, through the open connection. Returns the number of series.
+    Raises ValueError if the file isn't a tracker database."""
+    src = sqlite3.connect(path)
+    try:
+        try:
+            n = src.execute("SELECT COUNT(*) FROM series").fetchone()[0]
+        except sqlite3.DatabaseError as e:
+            raise ValueError(f"not a tracker database ({e})") from e
+        conn.commit()
+        src.backup(conn)
+    finally:
+        src.close()
+    conn.executescript(SCHEMA)            # older backups gain any newer tables
+    migrate(conn)
+    conn.commit()
+    return n

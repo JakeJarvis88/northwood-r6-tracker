@@ -12,12 +12,13 @@ import streamlit as st
 from siegestats import db, rating, sides
 from ui.common import (conn, UNASSIGNED, series_label, list_series, map_options,
                        roster_names, player_id_by_name, to_int, setting_int, toast,
-                       try_autosync, bump, last_action_line, reset_widgets)
+                       try_autosync, bump, last_action_line, reset_widgets, persistence_banner)
 from ui.import_page import edit_series_form, veto_editor, opban_grid
 
 
 def render_edit():
     st.title("✏️ Edit Matches")
+    persistence_banner()
     last_action_line()
     srs = list_series()
     if not srs:
@@ -52,7 +53,9 @@ def render_edit():
 
 
 # ================================================================== one map
+@st.fragment
 def map_editor(m, opp_id, opp_name):
+    """A fragment per map: edits inside one tab never redraw the others."""
     mg = m["map_game_id"]
     k = f"m{mg}"
     rph = setting_int("rounds_per_half", 6)
@@ -97,7 +100,7 @@ def map_editor(m, opp_id, opp_name):
         db.recalc_series(conn, m["series_id"])
         toast(f"Map #{mg} saved", "🎯")
         try_autosync()
-        st.rerun()
+        st.rerun(scope="app")
 
     # ---- 2. players ---------------------------------------------------------------
     st.markdown("**Players** — one row each; edit any number, or reassign a gamertag")
@@ -241,4 +244,4 @@ def map_editor(m, opp_id, opp_name):
             bump()
             toast(f"Map #{mg} deleted", "🗑️")
             try_autosync()
-            st.rerun()
+            st.rerun(scope="app")

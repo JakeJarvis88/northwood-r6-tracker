@@ -9,22 +9,26 @@ import streamlit as st
 from siegestats import db, matching, reader, dedupe, gsheets, insights, sides, rating, opbans, operators
 from ui.common import (conn, our_id, UNASSIGNED, MATCH_TYPES, series_label, list_series,
                        roster_names, player_id_by_name, map_options, to_int, toast, try_autosync, bump,
-                       last_action_line, reset_widgets)
+                       last_action_line, reset_widgets, persistence_banner, persistence_state)
 
 def edit_series_form(series):
     """Edit an existing series: opponent, competition, date, format, match type, etc."""
     sid = series["series_id"]
     with st.expander("✏️ Edit this series (opponent, competition, date, type…)"):
-        teams = [r["name"] for r in conn.execute(
-            "SELECT name FROM teams WHERE is_us=0 ORDER BY name").fetchall()]
-        cur_opp = series["opponent"]
-        opts = teams + ["➕ new team…"]
-        idx = opts.index(cur_opp) if cur_opp in teams else 0
+        cur_opp = series["opponent"] or ""
+        others = [r["name"] for r in conn.execute(
+            "SELECT name FROM teams WHERE is_us=0 AND lower(name)<>lower(?) ORDER BY name",
+            (cur_opp,)).fetchall()]
         with st.form(f"edit_series_{sid}"):
             c1, c2, c3 = st.columns(3)
-            opp_pick = c1.selectbox("Opponent", opts, index=idx)
-            new_opp = c1.text_input("New opponent name", value="",
-                                    help="Only used when '➕ new team…' is selected above.")
+            opp_name_in = c1.text_input("Opponent", value=cur_opp,
+                                        help="Type freely. Fix a typo and choose what it applies to below.")
+            opp_mode = c1.radio(
+                "Applies to", ["Rename this team everywhere", "Only re-point this series"],
+                index=0, key=f"oppmode_{sid}", horizontal=False,
+                help=("Rename fixes the spelling in every match. Re-point moves just this series "
+                      "to a different (or new) team. Typing a name that already exists merges the "
+                      "two, keeping the old spelling as an alias."))
             sdate = c2.date_input("Date", value=date.fromisoformat(str(series["date"])[:10]))
             fmt = c3.selectbox("Format", ["BO1", "BO3", "Other"],
                                index=["BO1", "BO3", "Other"].index(series["format"])
@@ -36,26 +40,38 @@ def edit_series_form(series):
             comp = c6.text_input("Competition/League", value=series["competition"] or "")
             vod = st.text_input("VOD link", value=series["vod"] or "")
             notes = st.text_area("Notes", value=series["notes"] or "", height=70)
-            st.caption("Renaming the opponent here re-points this series only. To merge two spellings "
-                       "of the same team, add the alternate name under Manage → Teams.")
+            if others:
+                st.caption("Other teams on record: " + ", ".join(others[:12])
+                           + (" …" if len(others) > 12 else ""))
             if st.form_submit_button("💾 Save series details"):
-                name = new_opp.strip() if opp_pick == "➕ new team…" else opp_pick
+                name = (opp_name_in or "").strip()
                 if not name:
-                    st.error("Pick an opponent or type a new team name.")
+                    st.error("An opponent name is required.")
                 else:
-                    oid = db.get_or_create_team(conn, name)
+                    note = ""
+                    oid = series["opponent_id"]
+                    if name.lower() != (cur_opp or "").lower():
+                        if opp_mode.startswith("Rename") and oid:
+                            oid, how = db.rename_or_merge_team(conn, oid, name)
+                            note = (f" · team renamed to {name} everywhere" if how == "renamed"
+                                    else f" · merged into the existing {name}")
+                        else:
+                            oid = db.get_or_create_team(conn, name)
+                            note = f" · this series now points at {name}"
                     conn.execute(
                         """UPDATE series SET opponent_id=?, date=?, format=?, match_type=?,
                            season=?, competition=?, vod=?, notes=? WHERE series_id=?""",
                         (oid, sdate.isoformat(), fmt, mtype, season, comp, vod, notes, sid))
                     conn.commit()
+                    bump()
                     try_autosync()
-                    toast("Series details saved", "💾")
-                    st.rerun()
+                    toast("Series saved" + note, "💾")
+                    st.rerun(scope="app")
 
 
 def render_import():
     st.title("📥 Import Match")
+    persistence_banner()
     last_action_line()
 
     # ---- 1. series ----------------------------------------------------------
@@ -163,6 +179,17 @@ def render_import():
                 cI.info(f"⏭️ {label} skipped — nothing saved.")
             else:
                 cI.success(f"✅ {label} imported (map #{mg}).")
+                if not persistence_state()[0]:
+                    try:
+                        if True:
+                            cI.download_button(
+                                "⬇️ Download the backup for this import", db.snapshot_bytes(conn),
+                                f"siege_backup_{pd.Timestamp.now():%Y%m%d_%H%M}.db",
+                                key=f"dl_{fname}", type="primary",
+                                help="Nothing is persisting this data — download it or it is lost "
+                                     "when the app restarts.")
+                    except OSError:
+                        pass
             if isinstance(mg, int) and cU.button("↩️ Undo", key=f"undo_{fname}",
                                                  help="Deletes this map and its stats"):
                 db.delete_map(conn, mg)
@@ -222,7 +249,10 @@ def finalize_section(sid, series):
         st.balloons()
 
 
+@st.fragment
 def review_one(fname, ex, sid, opp_id, opp_name):
+    """Runs as a fragment: typing in this card re-renders only this card,
+    so the rest of the page (and your scroll position) stays put."""
     teams = ex.get("teams", [])
     while len(teams) < 2:
         teams.append({"label": "", "score": None, "players": []})
@@ -414,14 +444,14 @@ def review_one(fname, ex, sid, opp_id, opp_name):
     with st.expander("✋ 1vX clutches and plants (manual — not on the scoreboard)"):
         st.caption("Northwood only. Leave blank if you didn't track them for this map; "
                    "blank is treated as 'not recorded', not as zero. These feed the player rating.")
-        ours_rows = edited[edited["Team"] == "Northwood"]
-        man_seed = pd.DataFrame({
-            "Player": [r["Assign to"] if r["Assign to"] != UNASSIGNED else r["Gamertag"]
-                       for _, r in ours_rows.iterrows()],
-            "1vX": [None] * len(ours_rows), "Plants": [None] * len(ours_rows)})
+        # Rows are keyed by gamertag (stable) so the table doesn't remount every
+        # time an assignment above changes; the player is resolved when saving.
+        our_tags = [p.get("gamertag", "") for p in ours.get("players", []) if p.get("gamertag")]
+        man_seed = pd.DataFrame({"Player": our_tags, "1vX": [None] * len(our_tags),
+                                 "Plants": [None] * len(our_tags)})
         man_edit = st.data_editor(
             man_seed, key=f"man_{fname}", width="stretch", hide_index=True,
-            column_config={"Player": st.column_config.TextColumn(disabled=True),
+            column_config={"Player": st.column_config.TextColumn("Gamertag", disabled=True),
                            "1vX": st.column_config.SelectboxColumn(options=list(range(0, 15)),
                                                                    help="Whole numbers 0-14"),
                            "Plants": st.column_config.SelectboxColumn(options=list(range(0, 15)),
@@ -464,7 +494,7 @@ def review_one(fname, ex, sid, opp_id, opp_name):
             ex["_imported"] = "skipped"
             reset_widgets(suffix=f"_{fname}")
             toast("Screenshot skipped", "⏭️")
-            st.rerun()
+            st.rerun(scope="app")
         if not map_name:
             st.error("Map name is required.")
             st.stop()
@@ -494,8 +524,11 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         if strip_rows:
             db.save_round_results(conn, mg_id, strip_rows)
         man_entries = []
+        tag_to_assignee = {str(r["Gamertag"]).strip(): r["Assign to"] for _, r in edited.iterrows()
+                           if r["Team"] == "Northwood"}
         for _, r in man_edit.iterrows():
-            pid = player_id_by_name(r["Player"])
+            who = tag_to_assignee.get(str(r["Player"]).strip(), UNASSIGNED)
+            pid = player_id_by_name(who) if who != UNASSIGNED else None
             if pid:
                 man_entries.append({"player_id": pid, "clutches": to_int(r["1vX"]),
                                     "plants": to_int(r["Plants"])})
@@ -519,7 +552,7 @@ def review_one(fname, ex, sid, opp_id, opp_name):
         toast(f"{map_name} {rw}-{rl} saved as map #{mg_id}" + (" (updated)" if action == "update" else ""),
               "🏆" if result == "W" else "💾")
         try_autosync()
-        st.rerun()
+        st.rerun(scope="app")
 
 
 
@@ -548,6 +581,7 @@ def _looks_unfinished(teams):
     return not scores or max(scores) < 7
 
 
+@st.fragment
 def veto_editor(sid, opp_id, opp_name):
     rows = conn.execute(
         """SELECT v.id, v.seq, t.name AS team, v.action, v.map_name FROM veto_events v
@@ -589,6 +623,7 @@ def opban_editor(sid, opp_id, opp_name):
     opban_grid(pick["map_game_id"], opp_id, opp_name, key=f"series_{sid}")
 
 
+@st.fragment
 def opban_grid(map_game_id, opp_id, opp_name, key=""):
     """The 12-slot ban grid for one map: seeded from stored rows, fully editable."""
     cur = pd.read_sql_query(

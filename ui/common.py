@@ -127,6 +127,52 @@ def toast(msg, icon="✅"):
         st.success(msg)
 
 
+def persistence_state():
+    """(protected, label) — is anything saving this data outside the container?"""
+    from siegestats import ghstore
+    token, repo = github_config()
+    if ghstore.configured(token, repo):
+        return True, f"GitHub ({repo})"
+    if db.get_setting(conn, "gs_autosync") == "1" and db.get_setting(conn, "gs_sheet"):
+        return True, "Google Sheets"
+    return False, None
+
+
+def persistence_banner():
+    """Shown at the top of every page. If nothing is persisting the database, say
+    so in the strongest terms and hand over a download button - a rebuild of the
+    hosting container erases everything otherwise."""
+    protected, where = persistence_state()
+    if st.session_state.get("_secret_nested_warning"):
+        st.warning(f"`{st.session_state['_secret_nested_warning']}` was found inside a [section] of "
+                   "your Secrets. It works, but move it above any [section] header to be safe.",
+                   icon="⚠️")
+    if protected and st.session_state.get("gh_error"):
+        st.error(f"**The last GitHub save failed:** {st.session_state['gh_error']}\n\n"
+                 "Your data is only in this session until a save succeeds. Fix the cause, then "
+                 "Manage → Data → Save database to GitHub now.", icon="🚨")
+        return
+    if protected:
+        last = st.session_state.get("gh_last_ok") or db.get_setting(conn, "gh_last_push") \
+            or db.get_setting(conn, "gs_last_sync")
+        st.caption(f"💾 Saving to {where}" + (f" · last save {last}" if last else " · no save yet"))
+        return
+    st.error(
+        "**Nothing is saving your data.** This app runs on a server with no permanent disk: "
+        "restarting it, pushing new code, or letting it sleep will erase everything you have "
+        "imported. Set this up now — Manage → Data → GitHub storage, about 3 minutes — or "
+        "download a backup every single time you import.", icon="🚨")
+    c1, c2 = st.columns([1, 3])
+    try:
+        if True:
+            c1.download_button("⬇️ Download backup now", db.snapshot_bytes(conn),
+                               f"siege_backup_{pd.Timestamp.now():%Y%m%d_%H%M}.db",
+                               type="primary", key=f"dlnow_{st.session_state.get('page_nav', '')}")
+    except OSError:
+        pass
+    c2.caption("Restore a downloaded file under Manage → Data → Restore from a backup file.")
+
+
 def last_action_line():
     la = st.session_state.get("last_action")
     if la:
@@ -143,10 +189,24 @@ def reset_widgets(*keys, prefix=None, suffix=None):
             del st.session_state[k]
 
 
+SECRET_ALIASES = {"github_token": ("github_token", "GITHUB_TOKEN", "gh_token"),
+                  "github_repo": ("github_repo", "GITHUB_REPO", "gh_repo")}
+
+
 def _secret(key, default=None):
+    """Read a secret. Also looks one level inside [tables], because a line added
+    below a [section] header in TOML silently becomes part of that section."""
+    names = SECRET_ALIASES.get(key, (key,))
     try:
-        if key in st.secrets:
-            return st.secrets[key]
+        for n in names:
+            if n in st.secrets:
+                return st.secrets[n]
+        for section in st.secrets.values():
+            if hasattr(section, "keys"):
+                for n in names:
+                    if n in section:
+                        st.session_state["_secret_nested_warning"] = n
+                        return section[n]
     except Exception:
         pass
     return default
@@ -157,19 +217,29 @@ def github_config():
 
 
 def push_to_github(quiet=False):
-    """Commit the database back to the repo, if a token is configured."""
+    """Commit a consistent snapshot of the database to the repo.
+
+    Failures are stored in session state and shown by persistence_banner() on
+    every page, because the page reruns right after a save and an inline warning
+    would vanish before anyone read it.
+    """
     token, repo = github_config()
     if not ghstore.configured(token, repo):
         return False
     try:
         with st.spinner("Saving to GitHub…"):
-            ghstore.push(token, repo, db.DB_PATH, message="Tracker update from the app")
-        db.set_setting(conn, "gh_last_push", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"))
+            sha = ghstore.push_bytes(token, repo, db.snapshot_bytes(conn),
+                                     message=f"Tracker update {pd.Timestamp.now():%Y-%m-%d %H:%M}")
+        stamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+        db.set_setting(conn, "gh_last_push", stamp)
+        st.session_state.pop("gh_error", None)
+        st.session_state["gh_last_ok"] = f"{stamp} · commit {str(sha)[:7]}"
         if not quiet:
             toast("Saved to GitHub", "💾")
         return True
     except Exception as e:
-        st.warning(f"Saved in this session, but the GitHub save failed: {e}")
+        st.session_state["gh_error"] = f"{pd.Timestamp.now():%H:%M} — {e}"
+        toast("GitHub save FAILED — see the red banner", "🚨")
         return False
 
 

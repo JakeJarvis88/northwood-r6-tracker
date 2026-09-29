@@ -246,3 +246,66 @@ def compare_players(ours: pd.DataFrame, names) -> pd.DataFrame:
         return t
     keep = ["Maps", "Rounds", "K", "D", "A", "K/D", "KPR", "SRV%", "DPR", "APR", "+/-", "Avg Score"]
     return t.set_index("display_name")[keep].T.reset_index().rename(columns={"index": "Metric"})
+
+
+# ------------------------------------------------------------------ records
+def _series_totals(ours: pd.DataFrame) -> pd.DataFrame:
+    """Kills per player per series (a BO3 = the sum of its maps)."""
+    return (ours.groupby(["display_name", "series_id"], dropna=False)
+            .agg(kills=("kills", "sum"), maps=("map_game_id", "nunique"), date=("date", "min"),
+                 opponent=("opponent", "first"), competition=("competition", "first"),
+                 format=("format", "first"))
+            .reset_index())
+
+
+def personal_bests(ours: pd.DataFrame) -> pd.DataFrame:
+    """Each player's most kills in a single map and in a single series."""
+    if ours is None or ours.empty:
+        return pd.DataFrame()
+    d = ours.dropna(subset=["kills"])
+    rows = []
+    series = _series_totals(d)
+    for name, g in d.groupby("display_name"):
+        m = g.sort_values(["kills", "date"], ascending=[False, True]).iloc[0]
+        sg = series[series["display_name"] == name].sort_values(["kills", "date"], ascending=[False, True])
+        s = sg.iloc[0] if not sg.empty else None
+        rows.append({
+            "Player": name,
+            "Best map (K)": int(m["kills"]),
+            "Map": m["map_name"], "Map vs": m["opponent"], "Map date": m["date"],
+            "Best series (K)": int(s["kills"]) if s is not None else None,
+            "Series maps": int(s["maps"]) if s is not None else None,
+            "Series vs": s["opponent"] if s is not None else None,
+            "Series date": s["date"] if s is not None else None,
+        })
+    return pd.DataFrame(rows).sort_values("Best map (K)", ascending=False)
+
+
+def league_kill_records(ours: pd.DataFrame) -> pd.DataFrame:
+    """One kill record per league. A league is BO1 or BO3, never both, so the record
+    is the most kills in a single map for a BO1 league and the most kills across a
+    whole series for a BO3 league. Ties list every player who shares the record."""
+    if ours is None or ours.empty:
+        return pd.DataFrame()
+    d = ours.dropna(subset=["kills"]).copy()
+    d["competition"] = d["competition"].fillna("").replace("", "(no league)")
+    out = []
+    for league, g in d.groupby("competition"):
+        fmt = g.drop_duplicates("series_id")["format"].mode()
+        fmt = fmt.iloc[0] if not fmt.empty else "BO1"
+        if fmt == "BO3":
+            t = _series_totals(g)
+            best = t["kills"].max()
+            top = t[t["kills"] == best].sort_values("date")
+            for _, r in top.iterrows():
+                out.append({"League": league, "Format": "BO3", "Record": "Kills in a series",
+                            "Kills": int(best), "Player": r["display_name"], "Date": r["date"],
+                            "Opponent": r["opponent"], "Detail": f"{int(r['maps'])} maps"})
+        else:
+            best = g["kills"].max()
+            top = g[g["kills"] == best].sort_values("date")
+            for _, r in top.iterrows():
+                out.append({"League": league, "Format": fmt, "Record": "Kills in a map",
+                            "Kills": int(best), "Player": r["display_name"], "Date": r["date"],
+                            "Opponent": r["opponent"], "Detail": r["map_name"]})
+    return pd.DataFrame(out).sort_values(["League", "Date"])

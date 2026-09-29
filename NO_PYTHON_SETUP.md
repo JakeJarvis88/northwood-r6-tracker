@@ -63,7 +63,13 @@ SIEGE_DB_PATH = "/tmp/northwood/siege.db"
 
 Either way the local file is disposable — Google Sheets is the durable copy.
 
-## Step 3 — Make the data permanent (5 min, do not skip)
+## Step 3 — Make the data permanent (5 min — DO THIS BEFORE YOUR FIRST IMPORT)
+
+> Skipping this loses everything. The app runs on a server with no permanent
+> disk. Pushing new code, rebooting, or the app going to sleep rebuilds the
+> container and erases the database. There is no recovery afterwards. Until this
+> is configured the app shows a red banner on every page with a download button —
+> if you see that banner, your data is one restart away from gone.
 
 Streamlit's free tier gives the app no permanent disk: when it restarts or wakes
 from sleep, anything you imported is gone. Fix it with a GitHub token — the app
@@ -91,7 +97,9 @@ github_repo = "your-username/northwood-r6-tracker"
    *Connected*. Click **💾 Save database to GitHub now** once to seed the stored copy.
 
 From then on it saves automatically every time you confirm an import or finalize a
-match. To verify it works: reboot the app (**⋮ → Reboot**) and check your data is
+match. Saves go to a separate branch called **`siege-data`** (created automatically)
+— not `main` — because Streamlit restarts the app on every commit to the branch it
+runs from. You'll see the saves under that branch's commit history. To verify it works: reboot the app (**⋮ → Reboot**) and check your data is
 still there.
 
 **Google Sheets is optional now.** Add it later if you want your team reading a

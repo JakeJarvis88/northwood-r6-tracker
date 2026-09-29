@@ -42,13 +42,8 @@ MATCH_TYPES = ["Gameday", "Scrim"]
 
 
 def _secret(key, default=None):
-    """Read from Streamlit secrets (cloud) or fall back to the local database."""
-    try:
-        if key in st.secrets:
-            return st.secrets[key]
-    except Exception:
-        pass
-    return default
+    from ui.common import _secret as shared_secret
+    return shared_secret(key, default)
 
 
 def login_gate():
@@ -108,11 +103,14 @@ def cloud_bootstrap():
     gh_token, gh_repo = _secret("github_token"), _secret("github_repo")
     if ghstore.configured(gh_token, gh_repo):
         try:
-            if store.is_empty(conn):
-                n = ghstore.pull(gh_token, gh_repo, db.DB_PATH)
-                if n:
-                    st.cache_resource.clear()
-                    return f"Loaded the team database from GitHub ({n // 1024} KB)."
+            if True:  # stored copy always wins on a fresh container
+                import tempfile
+                blob = ghstore.pull_bytes(gh_token, gh_repo)
+                if blob:
+                    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                        tmp.write(blob)
+                    n = db.restore_from_file(conn, tmp.name)
+                    return f"Loaded the team database from GitHub ({n} series)."
         except Exception as e:
             msg = f"Couldn't load the database from GitHub: {e}"
     if sheet and creds and os.path.exists(str(creds)):
